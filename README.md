@@ -1,4 +1,4 @@
-# Vespra
+# Vespra   
 
 A small chat bot you run in your own terminal. She is friendly — nosy, warm,
 quick with an opinion and a bad joke — not one of those bots that only ever asks
