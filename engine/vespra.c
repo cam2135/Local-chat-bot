@@ -57,6 +57,13 @@ static Mode mode = MODE_SMART;
 static char user_name[64];
 static long turn_no;
 
+/* Swearing: she matches your register, then settles back down. */
+static int swearing_on = 1;
+static int swear_level;      /* 0 polite, 1 amused, 2 joining in, 3 full tilt */
+static int calm_turns;       /* clean turns since the last swear */
+static int swear_cursor;
+static int calm_cursor;
+
 /* Remembered "my ..." lines, used when the user says something unrecognised. */
 static char memory[MEM_SLOTS][MAX_LINE];
 static int memory_count;
@@ -348,6 +355,10 @@ static void remember(char *const *words, int nw)
     if (cap_len[1] == 0)
         return;
 
+    /* "my name is Cam" is not the kind of thing worth bringing up later */
+    if (strcmp(words[cap_at[1]], "name") == 0)
+        return;
+
     while (MEMORY_TEMPLATES[count] != NULL)
         count++;
     tmpl = MEMORY_TEMPLATES[memory_cursor % count];
@@ -498,6 +509,71 @@ static void fallback(char *out, size_t outsz)
     fallback_cursor = (fallback_cursor + 1) % count;
 }
 
+/* ---------------------------------------------------------- the swearing */
+
+/* Whole word search in an already normalised line. */
+static int has_word(const char *hay, const char *word)
+{
+    size_t len = strlen(word);
+    const char *p = hay;
+
+    while ((p = strstr(p, word)) != NULL) {
+        int left_ok = (p == hay) || (p[-1] == ' ') || (p[-1] == '|');
+        char after = p[len];
+        int right_ok = (after == '\0' || after == ' ' || after == '|');
+        if (left_ok && right_ok)
+            return 1;
+        p += 1;
+    }
+    return 0;
+}
+
+static int contains_swear(const char *line)
+{
+    for (const char **w = SWEAR_WORDS; *w != NULL; w++)
+        if (has_word(line, *w))
+            return 1;
+    return 0;
+}
+
+/*
+ * Swear at her and she swears back, a bit more each time: amused first, then
+ * joining in, then matching you properly. Stop, and after a few clean turns she
+ * cools off again.
+ */
+static void swear_reply(char *out, size_t outsz)
+{
+    const char **list;
+    int count = 0;
+
+    if (swear_level < 3)
+        swear_level++;
+
+    list = (swear_level == 1) ? SWEAR_MILD
+         : (swear_level == 2) ? SWEAR_BACK
+                              : SWEAR_HARD;
+
+    while (list[count] != NULL)
+        count++;
+    snprintf(out, outsz, "%s", list[swear_cursor % count]);
+    swear_cursor = (swear_cursor + 1) % count;
+}
+
+/* Put the "right, calmed down now" line in front of an ordinary reply. */
+static void prepend_calm(char *s, size_t sz)
+{
+    char joined[MAX_REPLY];
+    int count = 0;
+
+    while (SWEAR_CALM[count] != NULL)
+        count++;
+
+    snprintf(joined, sizeof joined, "%s\n%.*s", SWEAR_CALM[calm_cursor % count],
+             (int)sizeof joined - 80, s);
+    calm_cursor = (calm_cursor + 1) % count;
+    snprintf(s, sz, "%.*s", (int)sz - 1, joined);
+}
+
 /* ------------------------------------------------------------- the modes */
 
 /* Keep only the first sentence, for fast mode. */
@@ -585,9 +661,11 @@ static int respond(const char *raw, char *out, size_t outsz)
 {
     char rough[MAX_LINE];
     char norm[MAX_LINE];
+    char flat[MAX_LINE];
     char clause_buf[MAX_LINE];
     char *clauses[8];
     int nclauses;
+    int cooled_off = 0;
 
     turn_no++;
     normalize(raw, rough, sizeof rough);
@@ -599,18 +677,32 @@ static int respond(const char *raw, char *out, size_t outsz)
         return 0;
     }
 
-    /* Was that a request for code? */
+    /* One clause-mark-free copy, for the searches that do not care about them */
     {
-        char flat[MAX_LINE];
-        char *tmp = flat;
+        char *tmp;
 
         snprintf(flat, sizeof flat, "%s", norm);
-        for (; *tmp != '\0'; tmp++)
+        for (tmp = flat; *tmp != '\0'; tmp++)
             if (*tmp == '|')
                 *tmp = ' ';
+    }
 
-        if (codegen_try(flat, out, outsz))
-            return 0;
+    /* Was that a request for code? */
+    if (codegen_try(flat, out, outsz))
+        return 0;
+
+    /* Are we swearing at each other? */
+    if (swearing_on && contains_swear(flat)) {
+        calm_turns = 0;
+        swear_reply(out, outsz);
+        shape_reply(out, outsz);
+        return 0;
+    }
+
+    if (swear_level > 0 && ++calm_turns >= 4) {
+        swear_level = 0;
+        calm_turns = 0;
+        cooled_off = 1;
     }
 
     snprintf(clause_buf, sizeof clause_buf, "%s", norm);
@@ -638,6 +730,8 @@ static int respond(const char *raw, char *out, size_t outsz)
         if (answer_clause(clauses[i], out, outsz)) {
             unmatched_turns = 0;
             shape_reply(out, outsz);
+            if (cooled_off)
+                prepend_calm(out, outsz);
             return 0;
         }
     }
@@ -645,6 +739,8 @@ static int respond(const char *raw, char *out, size_t outsz)
     unmatched_turns++;
     fallback(out, outsz);
     shape_reply(out, outsz);
+    if (cooled_off)
+        prepend_calm(out, outsz);
     return 0;
 }
 
@@ -698,6 +794,15 @@ static void control(const char *line, char *out, size_t outsz)
         mode = MODE_SMART;
         respond(line + 7, scratch, sizeof scratch);
         mode = saved;
+        return;
+    }
+
+    if (strncmp(line, "swear ", 6) == 0) {
+        swearing_on = (strcmp(line + 6, "off") != 0);
+        if (!swearing_on) {
+            swear_level = 0;
+            calm_turns = 0;
+        }
         return;
     }
 

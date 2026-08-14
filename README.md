@@ -1,8 +1,8 @@
 # Vespra
 
-A small chat bot you run in your own terminal. It listens, picks keywords out of
-what you say, and turns your sentences back at you — the old trick, done in C,
-with an old green screen to match.
+A small chat bot you run in your own terminal. She is friendly — nosy, warm,
+quick with an opinion and a bad joke — not one of those bots that only ever asks
+how that makes you feel. Written in C, with an old green screen to match.
 
 ```
   v     v  eeeeeee   sssss   pppppp   rrrrrr     aaa
@@ -15,24 +15,32 @@ with an old green screen to match.
 
   ──────────────────────────────────────────────────────
   local chat terminal   v1.0   engine: c   runner: python 3.11
-  offline · no model · no network · mode: smart   chat: unsaved
+  chat: unsaved   mode: smart   you: -   lines: 0
   ──────────────────────────────────────────────────────
 ```
 
-Every big letter is drawn out of little copies of itself.
+Every big letter is drawn out of little copies of itself. The bar under it, and
+the `unsaved·smart` in front of the prompt, are rebuilt from the live state every
+time they are drawn, so they always show the chat and mode you are actually in.
 
 ```
-vespra> Hello. I am Vespra. Tell me what is on your mind.
-you> I am worried about my mother
-vespra> Your mother?
-you> she never listens to me
-vespra> Really, never?
+vespra> Hey! I am Vespra. What is going on with you today?
+unsaved·smart you> my name is Cam
+vespra> Nice to meet you properly!
+unsaved·smart you> i am tired
+vespra> Cam, long day? Or just one of those weeks?
+unsaved·smart you> my laptop is dying
+vespra> Your laptop is dying, eh. Tell me about that.
+unsaved·smart you> tell me a joke
+vespra> Alright: why do programmers prefer dark mode?
+        Because light attracts bugs.
 ```
 
-It saves conversations, remembers them when you reopen them, learns your name,
-and will write you small pieces of **Python, JavaScript, HTML or CSS** when you
-ask. There is no AI model, no API key and no internet connection anywhere in it
-— a few hundred lines of C and Python, entirely offline.
+She saves conversations, remembers them when you reopen them, picks up your name
+from the conversation, swears back if you swear at her, and writes small pieces
+of **Python, JavaScript, HTML or CSS** when you ask. There is no AI model, no API
+key and no internet connection anywhere in it — a few hundred lines of C and
+Python, entirely offline.
 
 ## What you need
 
@@ -73,6 +81,7 @@ explained.
 | `/name <yourname>` | tell it what to call you |
 | `/mode fast\|smart\|pro` | how hard it thinks (also `/fast`, `/smart`, `/pro`) |
 | `/code <lang> <thing>` | ask for a snippet outright |
+| `/swear on\|off` | whether she swears back (on by default) |
 | `/who` | the open chat, your name, the mode, the turn count |
 | `/history [n]` | show the last n lines again |
 | `/export [file.txt]` | write the conversation out as plain text |
@@ -89,28 +98,38 @@ Options: `python3 run.py --open work`, `--mode pro`, `--rebuild`, `--no-color`,
 ## Saved chats and memory
 
 ```
-you> /name Cam
-  hello, Cam
-you> I am worried about my mother
-vespra> Your mother?
-you> /save work
-  saved as work (2 lines) -- it will keep saving itself now
+unsaved·smart you> my name is Cam
+vespra> Nice to meet you properly!
+unsaved·smart you> my boss has been unbearable
+vespra> Ah. Good boss or one of the other kind?
+unsaved·smart you> /save work
+  saved as work (4 lines) -- it will keep saving itself now
+  ──────────────────────────────────────────────────────
+  chat: work   mode: smart   you: Cam   lines: 4
+  ──────────────────────────────────────────────────────
 ```
+
+She picks your name up out of the conversation — "my name is Cam" or "call me
+Cam" is enough, no command needed.
 
 Once a chat has a name it saves itself after every single line, so nothing is
 lost if you close the window. Come back later:
 
 ```
-you> /open work
-  opened work -- 4 lines, mode pro, you are Cam
+work·pro you> /open work
+  opened work
+  ──────────────────────────────────────────────────────
+  chat: work   mode: pro   you: Cam   lines: 4
+  ──────────────────────────────────────────────────────
 
-  you> i am worried about my mother
-  vespra> Your mother?
+  you> my boss has been unbearable
+  vespra> Ah. Good boss or one of the other kind?
 
-vespra> We were talking before. I still have it. Go on.
-you> nothing makes sense anymore
-vespra> Cam, please go on.
-        Earlier you said your mother.
+vespra> Hey, you are back. I still have everything we talked about. Carry on.
+work·pro you> anyway, where were we
+vespra> Cam, ha, alright. Tell me more.
+        Hang on, earlier you mentioned your boss has been unbearable. What is
+        happening there?
 ```
 
 It genuinely picks up where it left off. Opening a chat quietly replays every
@@ -130,23 +149,41 @@ copy, move or delete. They are not committed to git.
 | `pro` | an answer plus a second thought, after a longer pause |
 
 ```
-you> /fast
-you> i am tired of all of this
-vespra> How long have you been tired of all of this?
+work·fast you> i am tired of all of this
+vespra> Long day?
 
-you> /pro
-you> i am tired of all of this
-vespra> Cam, do you believe it is normal to be tired of all of this?
-        You have told me what happened. You have not told me how it left you.
+work·pro you> i am tired of all of this
+vespra> Cam, or just one of those weeks?
+        Is that a new thing, or has it been brewing a while?
 ```
 
-Being straight with you: the modes change **how much it says and how long it
-waits**, not how clever it is underneath. It is the same pattern matcher in all
-three — there is no bigger model to switch to. `pro` composes a longer reply and
-brings back things you said earlier; `fast` clips to one sentence and answers
-instantly.
+Being straight with you: the modes change **how much she says and how long she
+waits**, not how clever she is underneath. It is the same pattern matcher in all
+three — there is no bigger model to switch to. `pro` composes a longer reply,
+uses your name and brings back things you said earlier; `fast` clips to one
+sentence and answers instantly.
 
-The mode is saved with the chat.
+The mode is saved with the chat, and the prompt always shows which one you are
+in.
+
+## Swearing
+
+Swear at her and she gives it back, a bit more each time — amused first, then
+joining in, then properly matching you. Stop, and after a few clean turns she
+settles down again.
+
+```
+unsaved·smart you> this is fucking ridiculous
+vespra> Ha! Alright, strong words. What has got you worked up?
+unsaved·smart you> the whole shitty project is late
+vespra> Ah hell, no wonder you are annoyed.
+unsaved·smart you> fuck this
+vespra> Right, screw them. Tell me the whole bloody story.
+```
+
+She only ever swears after you do, it is ordinary profanity and nothing worse,
+and `/swear off` turns it off entirely — kept per chat, so a work chat can stay
+clean while another does not.
 
 ## Asking it for code
 
@@ -213,22 +250,29 @@ screen, the green, the prompt, the commands and the saved chats.
 **`engine/`** is the bot itself. For each line it:
 
 1. normalises the text — lower case, punctuation split into clauses, and
-   contractions expanded (`i'm` → `i am`), so the script needs only one spelling;
+   contractions expanded (`i'm` → `i am`, `wanna` → `want to`), so the script
+   needs only one spelling;
 2. offers the line to `codegen.c` first, in case you asked for code;
-3. otherwise finds the highest ranked keyword in the sentence — `computer` beats
-   `my` beats `i` — and matches that keyword's decomposition patterns, where
-   `*` stands for any run of words;
-4. flips the pronouns in whatever the `*` captured (`my job` → `your job`) and
-   pastes it into a reply template (`How long have you been %2?`);
-5. if nothing matches, it either brings back something you said earlier about
-   "my ..." or falls back to `Please go on.`;
-6. shapes the answer for the current mode.
+3. checks whether you swore, and if so answers in kind at the current level;
+4. otherwise finds the highest ranked keyword in the sentence — topics like
+   `pizza` and `boss` beat `my`, which beats the catch-all `i` — and matches
+   that keyword's decomposition patterns, where `*` stands for any run of
+   words;
+5. flips the pronouns in whatever the `*` captured (`my job` → `your job`) and
+   pastes it into a reply template (`Your %2, eh. Tell me about that.`);
+6. if nothing matches, it either brings back something you said earlier about
+   "my ..." or falls back to `Go on, I am listening.`;
+7. shapes the answer for the current mode.
 
-Replies rotate through each rule's list rather than repeating, which is why
-saying the same thing twice gets you two different answers.
+The script in `engine/script.h` is about a hundred keywords deep — feelings,
+food, music, games, school, work, pets, code, weather, jokes, and the general
+`i`/`you`/`my` rules underneath — and replies rotate through each rule's list
+rather than repeating, which is why saying the same thing twice gets you two
+different answers.
 
 Lines going into the engine are tagged: `>text` is speech, `!command` is a
-setting from the runner (`!mode pro`, `!name Cam`, `!replay <line>`). Replies
+setting from the runner (`!mode pro`, `!name Cam`, `!swear off`,
+`!replay <line>`). Replies
 come back as one or more lines ending in a `--END--` sentinel — that sentinel is
 what lets a multi-line code snippet arrive as a single reply. A line with no tag
 counts as speech, so you can run the engine on its own without Python:
@@ -253,7 +297,8 @@ build/            the compiled engine (created for you, not in git)
 
 ## Making it your own
 
-**A new thing to say.** Open `engine/script.h` and add to `KEYWORDS`:
+**A new thing to say.** Open `engine/script.h` — that file is the whole
+personality — and add to `KEYWORDS`:
 
 ```c
 { "money", 3, {
@@ -313,14 +358,18 @@ colours. Run `python3 run.py --no-color`.
 python3 tests/smoke.py
 ```
 
-Thirty-odd checks: it builds the engine, holds a conversation, saves it, reopens
-it, confirms the memory survived, and deletes it again — all inside a temporary
-folder, so your own chats are never touched.
+Forty checks: it builds the engine, holds a conversation, tells a joke, saves
+the chat, reopens it, confirms the memory survived, swears at her and checks she
+swears back, checks `/swear off` keeps her clean, checks the status bar is never
+stale, and deletes everything again — all inside a temporary folder, so your own
+chats are never touched.
 
 ## A note on what this is
 
-Vespra has no idea what you are talking about. Bots like this were written in the
-mid-1960s to show how little it takes to *seem* understanding, and their authors
-were unsettled by how readily people confided in them anyway. This one is the
-same trick, plus a box of code snippets and somewhere to keep your conversations.
+Vespra has no idea what you are talking about. Bots like this were written in
+the mid-1960s to show how little it takes to *seem* understanding, and their
+authors were unsettled by how readily people confided in them anyway. This one is
+the same trick with a friendlier script — plus jokes, a box of code snippets,
+somewhere to keep your conversations, and a mouth on her if you start it.
+
 It's a toy, and a nice one to read: start at `respond()` in `engine/vespra.c`.

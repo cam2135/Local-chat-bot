@@ -56,13 +56,22 @@ for item in ("run.py", "engine", "build"):
         shutil.copy2(source, sandbox / item)
 RUNNER = sandbox / "run.py"
 
+MEMORY_LINES = ("mentioned your mother", "back to your mother",
+                "about your mother before", "thinking about your mother")
+
+
+def remembers(text: str) -> bool:
+    return any(phrase in text for phrase in MEMORY_LINES)
+
+
 print("building and chatting ...")
 
 out = say([
     "Hello",
     "I am worried about my mother",
-    "I can't sleep at night",
-    "You are only a machine",
+    "I can't stand it",
+    "you are very good at this",
+    "tell me a joke",
     "make me a button in css",
     "write hello world in py",
     "show me a loop in javascript",
@@ -75,16 +84,22 @@ print("conversation:")
 check("draws the boot screen", "eeeeeee" in out and "aaaaaaa" in out and
       "sssss" in out, "expected big letters drawn out of little ones")
 check("greets on start", "I am Vespra" in out)
+check("sounds friendly, not clinical",
+      not any(phrase in out for phrase in
+              ("What does that suggest to you", "Does talking about this bother",
+               "How does that make you feel")))
 check("no trace of the old name", "eliza" not in out.lower())
 check("swaps pronouns", "your mother" in out, "expected 'my mother' -> 'your mother'")
-check("expands contractions", "can not sleep" in out.lower())
-check("answers 'you are ...'", "I am only a machine" in out)
+check("expands contractions", "stand it" in out.lower(),
+      "\"i can't stand it\" should match the \"i can not\" pattern")
+check("takes a compliment", "I will take that" in out or "too kind" in out)
+check("tells a joke", "bugs" in out.lower() or "console it" in out.lower())
 check("writes css", "--- css ---" in out and ".btn {" in out)
 check("writes python", "--- python ---" in out and 'print("Hello, world!")' in out)
 check("writes javascript", "--- javascript ---" in out and "console.log" in out)
 check("writes html", "--- html ---" in out and "<table>" in out)
-check("brings back a remembered remark", "Earlier you said your mother" in out)
-check("says goodbye", "Goodbye" in out)
+check("brings back a remembered remark", remembers(out))
+check("says goodbye", "See you" in out or "Take it easy" in out)
 
 print("commands:")
 helped = say(["/help", "/bye"])
@@ -119,7 +134,7 @@ check("/open restores the conversation", "i am worried about my mother"
       in reopened.lower())
 check("/open restores your name", "you      Cam" in reopened)
 check("/open restores the mode", "mode     pro" in reopened)
-check("/open restores the memory", "Earlier you said your mother" in reopened)
+check("/open restores the memory", remembers(reopened))
 
 listed = say(["/list", "/bye"])
 check("/list shows the chat", "mychat" in listed)
@@ -141,6 +156,32 @@ check("/rm ALL removes everything",
 
 underscore = say(["/save_undertest", "/list", "/bye"])
 check("/save_name works like /save name", "undertest" in underscore)
+
+print("swearing:")
+sweary = say(["this is fucking ridiculous", "the whole shitty thing is late",
+              "fuck all of it", "/bye"])
+check("swears back when you do",
+      any(word in sweary.lower() for word in ("damn", "hell", "bloody", "crap",
+                                              "fuck", "sod", "shit")))
+escalates = [line for line in sweary.splitlines() if line.startswith("vespra> ")]
+check("starts mild and builds", len(escalates) >= 3 and
+      escalates[0] != escalates[-1])
+
+clean = say(["/swear off", "this is fucking ridiculous", "/bye"])
+check("/swear off keeps it clean",
+      not any(word in clean.lower() for word in
+              ("fuck it", "bloody hell", "sod that", "screw them")))
+check("stays polite by default in ordinary chat",
+      not any(word in out.lower() for word in ("fuck", "shit", "bloody")))
+
+print("live status:")
+status = say(["/pro", "/save trial", "/who", "/bye"])
+check("prompt shows the mode you switched to", "trial\u00b7pro you>" in status
+      or "trial\u00b7pro" in status)
+check("status bar refreshes on change", "mode: pro" in status)
+check("status bar shows the saved chat name", "chat: trial" in status)
+check("no stale mode left on screen", "mode: smart" not in status.split("/pro")[-1])
+say(["/rm trial", "y", "/bye"])
 
 print("engine:")
 binary = sandbox / "build" / ("vespra.exe" if sys.platform == "win32" else "vespra")

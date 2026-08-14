@@ -83,6 +83,10 @@ COMMANDS = [
     ("/code", "<lang> <thing>", "ask for a code snippet outright",
      "For example /code css dark mode. Python, JavaScript, HTML and CSS.\n"
      "  You can also just say \"make me a button in css\" in normal conversation."),
+    ("/swear", "on|off", "whether she swears back at you",
+     "On by default: swear at her and she gives it back, harder the longer you\n"
+     "  keep it up, and she settles down again once you do. /swear off keeps her\n"
+     "  clean whatever you say."),
     ("/who", "", "what Vespra currently knows",
      "The open chat, your name, the mode, and how many turns you have had."),
     ("/history", "[n]", "show the last n lines again",
@@ -134,7 +138,12 @@ class Screen:
         self.you = "\033[1;37m" if enabled else ""      # your own typing
         self.off = "\033[0m" if enabled else ""
 
+    @property
+    def width(self) -> int:
+        return max(28, shutil.get_terminal_size(fallback=(80, 24)).columns)
+
     def banner(self, word: str) -> list[str]:
+        """Each big letter drawn out of little copies of itself."""
         rows = ["" for _ in range(7)]
         for char in word.upper():
             art = LETTERS.get(char, LETTERS["?"])
@@ -143,24 +152,34 @@ class Screen:
                 rows[i] += row.replace("#", ink).replace(".", " ") + "  "
         return [row.rstrip() for row in rows]
 
-    def boot(self, mode: str, chat: str | None) -> None:
+    def fit(self, text: str) -> str:
+        """Never let a line wrap awkwardly in a narrow window."""
+        room = self.width - 4
+        return text if len(text) <= room else text[: room - 1] + "…"
+
+    def boot(self, status: str) -> None:
         if self.on:
             print("\033[2J\033[H", end="")
 
         print()
-        for row in self.banner(BOT):
-            print(f"  {self.bright}{row}{self.off}")
+        big = self.banner(BOT)
+        if len(big[0]) + 4 <= self.width:
+            for row in big:
+                print(f"  {self.bright}{row}{self.off}")
+        else:                       # narrow window: small sign instead
+            print(f"  {self.bright}{' '.join(BOT)}{self.off}")
         print()
-        bar = "─" * 54
+
+        bar = "─" * min(54, self.width - 4)
         print(f"  {self.green}{bar}{self.off}")
-        print(f"  {self.dim}local chat terminal   v{VERSION}   "
-              f"engine: c   runner: python {sys.version_info.major}."
-              f"{sys.version_info.minor}{self.off}")
-        print(f"  {self.dim}offline · no model · no network · "
-              f"mode: {mode}   chat: {chat or 'unsaved'}{self.off}")
+        print(f"  {self.dim}"
+              f"{self.fit(f'local chat terminal   v{VERSION}   engine: c   runner: python {sys.version_info.major}.{sys.version_info.minor}')}"
+              f"{self.off}")
+        print(f"  {self.dim}{self.fit(status)}{self.off}")
         print(f"  {self.green}{bar}{self.off}")
-        print(f"  {self.dim}/help for commands, /HELP for the long version, "
-              f"/bye to leave{self.off}")
+        print(f"  {self.dim}"
+              f"{self.fit('/help for commands, /HELP for the long version, /bye to leave')}"
+              f"{self.off}")
         print()
 
 
@@ -273,6 +292,7 @@ class Chat:
         self.name: str | None = None
         self.user: str = ""
         self.mode: str = "smart"
+        self.swearing: bool = True
         self.created: str = time.strftime("%Y-%m-%d %H:%M")
         self.turns: list[dict] = []
 
@@ -296,6 +316,7 @@ class Chat:
             "name": self.name,
             "user": self.user,
             "mode": self.mode,
+            "swearing": self.swearing,
             "created": self.created,
             "updated": time.strftime("%Y-%m-%d %H:%M"),
             "turns": self.turns,
@@ -311,6 +332,7 @@ class Chat:
         chat.name = data.get("name", name)
         chat.user = data.get("user", "")
         chat.mode = data.get("mode", "smart")
+        chat.swearing = data.get("swearing", True)
         chat.created = data.get("created", "")
         chat.turns = data.get("turns", [])
         return chat
@@ -348,8 +370,25 @@ class Session:
 
     # ---- output helpers
 
+    def status_line(self) -> str:
+        """The live state, built fresh every time so it can never go stale."""
+        if self.screen.width < 52:      # narrow window: keep the useful half
+            return (f"{self.chat.name or 'unsaved'} · {self.chat.mode} · "
+                    f"{self.chat.user or '-'}")
+        return (f"chat: {self.chat.name or 'unsaved'}   "
+                f"mode: {self.chat.mode}   "
+                f"you: {self.chat.user or '-'}   "
+                f"lines: {len(self.chat.turns)}")
+
+    def show_status(self) -> None:
+        bar = "─" * min(54, self.screen.width - 4)
+        print(f"  {self.screen.green}{bar}{self.screen.off}")
+        print(f"  {self.screen.dim}{self.screen.fit(self.status_line())}"
+              f"{self.screen.off}")
+        print(f"  {self.screen.green}{bar}{self.screen.off}")
+
     def note(self, text: str) -> None:
-        print(f"  {self.screen.dim}{text}{self.screen.off}")
+        print(f"  {self.screen.dim}{self.screen.fit(text)}{self.screen.off}")
 
     def para(self, text: str, indent: int = 6) -> None:
         """Print an explanation, every line lined up under the same margin."""
@@ -412,6 +451,7 @@ class Session:
 
     def push_state(self) -> None:
         self.engine.control(f"mode {self.chat.mode}")
+        self.engine.control(f"swear {'on' if self.chat.swearing else 'off'}")
         if self.chat.user:
             self.engine.control(f"name {self.chat.user}")
         else:
@@ -434,12 +474,25 @@ class Session:
 
     def user_says(self, text: str) -> None:
         self.chat.add("you", text)
+        self.learn_name(text)
         self.think()
         lines, done = self.engine.say(text)
         self.speak(lines)
         self.chat.save()
         if done:
             self.running = False
+
+    def learn_name(self, text: str) -> None:
+        """Pick up "my name is Cam" without needing the /name command."""
+        match = re.search(r"\b(?:my name is|call me|i am called|im called)\s+"
+                          r"([A-Za-z][A-Za-z'-]{1,30})", text, re.IGNORECASE)
+        if not match:
+            return
+        name = match.group(1).capitalize()
+        if name.lower() == self.chat.user.lower():
+            return
+        self.chat.user = name
+        self.push_state()
 
     # ---- commands
 
@@ -500,6 +553,7 @@ class Session:
         self.chat.save()
         self.note(f"saved as {name} ({len(self.chat.turns)} lines)"
                   + (" -- it will keep saving itself now" if first_time else ""))
+        self.show_status()
 
     def cmd_open(self, arg: str) -> None:
         if not arg:
@@ -520,9 +574,8 @@ class Session:
             return
 
         self.replay()
-        self.note(f"opened {arg} -- {len(self.chat.turns)} lines, "
-                  f"mode {self.chat.mode}"
-                  + (f", you are {self.chat.user}" if self.chat.user else ""))
+        self.note(f"opened {arg}")
+        self.show_status()
         self.show_history(6)
         self.speak(self.engine.control("back"), remember=False)
 
@@ -601,6 +654,7 @@ class Session:
         self.chat.save()
         Chat.path_for(old).unlink(missing_ok=True)
         self.note(f"{old} is now {arg}")
+        self.show_status()
 
     def cmd_new(self, arg: str) -> None:
         if self.chat.turns and not self.chat.name:
@@ -621,6 +675,7 @@ class Session:
 
         self.note("fresh conversation"
                   + (f", saved as {self.chat.name}" if self.chat.name else ""))
+        self.show_status()
         self.speak(self.engine.control("hello"), remember=False)
 
     def cmd_name(self, arg: str) -> None:
@@ -638,7 +693,8 @@ class Session:
         self.chat.user = arg[:40]
         self.push_state()
         self.chat.save()
-        self.note(f"hello, {self.chat.user}")
+        self.note(f"hello, {self.chat.user}!")
+        self.show_status()
 
     def cmd_mode(self, arg: str) -> None:
         if not arg:
@@ -655,6 +711,20 @@ class Session:
         self.push_state()
         self.chat.save()
         self.note(f"mode {want}: {MODES[want][1]}")
+        self.show_status()
+
+    def cmd_swear(self, arg: str) -> None:
+        if not arg:
+            self.note("swearing is "
+                      + ("on -- give it to me and I will give it back"
+                         if self.chat.swearing else "off -- I will stay clean"))
+            return
+
+        self.chat.swearing = arg.lower() not in ("off", "no", "false", "0")
+        self.push_state()
+        self.chat.save()
+        self.note("alright, I will swear back" if self.chat.swearing
+                  else "fine, keeping it clean from here")
 
     def cmd_who(self) -> None:
         lines = self.chat.turns
@@ -663,6 +733,7 @@ class Session:
         self.note(f"chat     {self.chat.name or 'unsaved (nothing on disk yet)'}")
         self.note(f"you      {self.chat.user or 'unnamed -- try /name Cam'}")
         self.note(f"mode     {self.chat.mode} -- {MODES[self.chat.mode][1]}")
+        self.note(f"swearing {'on' if self.chat.swearing else 'off'}")
         self.note(f"lines    {len(lines)} ({yours} from you)")
         self.note(f"started  {self.chat.created}")
         print()
@@ -703,8 +774,8 @@ class Session:
         elif self.chat.turns:
             self.note("this chat was not saved (/save mychat next time)")
         print(f"{self.screen.bright}{PROMPT_BOT}> "
-              f"Goodbye{', ' + self.chat.user if self.chat.user else ''}. "
-              f"Take care of yourself.{self.screen.off}")
+              f"See you{', ' + self.chat.user if self.chat.user else ''}! "
+              f"Come back whenever.{self.screen.off}")
         self.running = False
 
     # ---- dispatch
@@ -743,6 +814,8 @@ class Session:
             self.cmd_mode(arg)
         elif key in MODES:
             self.cmd_mode(key)
+        elif key == "swear":
+            self.cmd_swear(arg)
         elif key == "who":
             self.cmd_who()
         elif key == "history":
@@ -750,7 +823,7 @@ class Session:
         elif key == "export":
             self.cmd_export(arg)
         elif key == "clear":
-            self.screen.boot(self.chat.mode, self.chat.name)
+            self.screen.boot(self.status_line())
         elif key == "rebuild":
             self.cmd_rebuild()
         elif key in ("bye", "quit", "exit", "q"):
@@ -763,7 +836,7 @@ class Session:
     # ---- loop
 
     def run(self) -> int:
-        self.screen.boot(self.chat.mode, self.chat.name)
+        self.screen.boot(self.status_line())
 
         if self.chat.turns:          # opened with --open: pick up where we left off
             self.show_history(6)
@@ -773,7 +846,11 @@ class Session:
 
         while self.running:
             try:
-                print(f"{self.screen.you}you> {self.screen.off}", end="", flush=True)
+                # the prompt carries the live state, so it is always right
+                print(f"{self.screen.dim}{self.chat.name or 'unsaved'}·"
+                      f"{self.chat.mode} {self.screen.off}"
+                      f"{self.screen.you}you> {self.screen.off}",
+                      end="", flush=True)
                 text = input()
                 if not sys.stdin.isatty():
                     print(text)         # piped input is not echoed for us
