@@ -13,10 +13,10 @@ how that makes you feel. Written in C, with an old green screen to match.
     v v    e              s  p        r    r   a     a
      v     eeeeeee   sssss   p        r     r  a     a
 
-  ──────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────
   local chat terminal   v1.0   engine: c   runner: python 3.11
   chat: unsaved   mode: smart   you: -   lines: 0
-  ──────────────────────────────────────────────────────
+  ────────────────────────────────────────────────────────────
 ```
 
 Every big letter is drawn out of little copies of itself. The bar under it, and
@@ -25,10 +25,10 @@ time they are drawn, so they always show the chat and mode you are actually in.
 
 ```
 vespra> Hey! I am Vespra. What is going on with you today?
-unsaved·smart you> my name is Cam
+unsaved·smart you> my name is Sam
 vespra> Nice to meet you properly!
 unsaved·smart you> i am tired
-vespra> Cam, long day? Or just one of those weeks?
+vespra> Sam, long day? Or just one of those weeks?
 unsaved·smart you> my laptop is dying
 vespra> Your laptop is dying, eh. Tell me about that.
 unsaved·smart you> tell me a joke
@@ -82,6 +82,7 @@ explained.
 | `/mode fast\|smart\|pro` | how hard it thinks (also `/fast`, `/smart`, `/pro`) |
 | `/code <lang> <thing>` | ask for a snippet outright |
 | `/swear on\|off` | whether she swears back (on by default) |
+| `/summary` | thinking time, characters typed, average wpm, and more |
 | `/who` | the open chat, your name, the mode, the turn count |
 | `/history [n]` | show the last n lines again |
 | `/export [file.txt]` | write the conversation out as plain text |
@@ -98,19 +99,19 @@ Options: `python3 run.py --open work`, `--mode pro`, `--rebuild`, `--no-color`,
 ## Saved chats and memory
 
 ```
-unsaved·smart you> my name is Cam
+unsaved·smart you> my name is Sam
 vespra> Nice to meet you properly!
 unsaved·smart you> my boss has been unbearable
 vespra> Ah. Good boss or one of the other kind?
 unsaved·smart you> /save work
   saved as work (4 lines) -- it will keep saving itself now
-  ──────────────────────────────────────────────────────
-  chat: work   mode: smart   you: Cam   lines: 4
-  ──────────────────────────────────────────────────────
+  ──────────────────────────────────────────────
+  chat: work   mode: smart   you: Sam   lines: 4
+  ──────────────────────────────────────────────
 ```
 
-She picks your name up out of the conversation — "my name is Cam" or "call me
-Cam" is enough, no command needed.
+She picks your name up out of the conversation — "my name is Sam" or "call me
+Sam" is enough, no command needed.
 
 Once a chat has a name it saves itself after every single line, so nothing is
 lost if you close the window. Come back later:
@@ -118,16 +119,16 @@ lost if you close the window. Come back later:
 ```
 work·pro you> /open work
   opened work
-  ──────────────────────────────────────────────────────
-  chat: work   mode: pro   you: Cam   lines: 4
-  ──────────────────────────────────────────────────────
+  ───────────────────────────────────────────
+  chat: work   mode: pro   you: Sam   lines: 4
+  ───────────────────────────────────────────
 
   you> my boss has been unbearable
   vespra> Ah. Good boss or one of the other kind?
 
 vespra> Hey, you are back. I still have everything we talked about. Carry on.
 work·pro you> anyway, where were we
-vespra> Cam, ha, alright. Tell me more.
+vespra> Sam, ha, alright. Tell me more.
         Hang on, earlier you mentioned your boss has been unbearable. What is
         happening there?
 ```
@@ -153,7 +154,7 @@ work·fast you> i am tired of all of this
 vespra> Long day?
 
 work·pro you> i am tired of all of this
-vespra> Cam, or just one of those weeks?
+vespra> Sam, or just one of those weeks?
         Is that a new thing, or has it been brewing a while?
 ```
 
@@ -184,6 +185,59 @@ vespra> Right, screw them. Tell me the whole bloody story.
 She only ever swears after you do, it is ordinary profanity and nothing worse,
 and `/swear off` turns it off entirely — kept per chat, so a work chat can stay
 clean while another does not.
+
+## Settings that stick
+
+Whatever you were last using is what you get next time. Set `/pro`, close the
+window, come back tomorrow — still `/pro`. Same for `/swear off` and your name.
+
+```
+$ python3 run.py           # yesterday you typed /pro
+  chat: unsaved   mode: pro   you: Sam   lines: 0
+```
+
+It lives in `config.json` next to `run.py`: the mode, the swearing setting, your
+name, the last chat you had open and the running totals `/summary` reports.
+Saved chats keep their own copy too, so opening one puts you back in the mode
+that chat was in. Delete `config.json` to start fresh — nothing else depends on
+it. It is not committed to git.
+
+## /summary
+
+Who did the talking, and how long everybody took over it:
+
+```
+  ────────────────────────────────────────────────────────
+  summary
+  this session
+      chatting for       18m 42s
+      you said           37 lines, 1,204 characters, 233 words
+      typing speed       61 wpm (317 characters a minute)
+      she thought for    1m 51s   (mode pro)
+      she said           74 lines, 3,918 characters
+
+  this chat (work)
+      started            2026-08-14 11:34
+      lines              128 in total, 64 from you
+      you have typed     4,301 characters, 812 words
+      typing speed       58 wpm (301 characters a minute)
+      she has thought    6m 12s
+
+  all time
+      saved chats        4
+      you have typed     19,882 characters over 388 lines
+      typing speed       59 wpm (308 characters a minute)
+      she has thought    24m 07s
+      she has typed      61,204 characters back
+      favourite mode     smart (241 of 388 turns)
+  ────────────────────────────────────────────────────────
+```
+
+Thinking time is the real measured pause she made you wait, and words a minute
+is measured from when the prompt appears to when you press enter — so it only
+counts when you are genuinely typing at a terminal, not when input is piped in.
+The three blocks are this run, this conversation across all its sessions, and
+everything you have ever typed at her.
 
 ## Asking it for code
 
@@ -271,7 +325,7 @@ rather than repeating, which is why saying the same thing twice gets you two
 different answers.
 
 Lines going into the engine are tagged: `>text` is speech, `!command` is a
-setting from the runner (`!mode pro`, `!name Cam`, `!swear off`,
+setting from the runner (`!mode pro`, `!name Sam`, `!swear off`,
 `!replay <line>`). Replies
 come back as one or more lines ending in a `--END--` sentinel — that sentinel is
 what lets a multi-line code snippet arrive as a single reply. A line with no tag

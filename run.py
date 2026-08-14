@@ -87,6 +87,9 @@ COMMANDS = [
      "On by default: swear at her and she gives it back, harder the longer you\n"
      "  keep it up, and she settles down again once you do. /swear off keeps her\n"
      "  clean whatever you say."),
+    ("/summary", "", "who did the talking, and how long it took",
+     "How long she has spent thinking, how much you have typed, your average\n"
+     "  words a minute, and the same again for this chat and for all time."),
     ("/who", "", "what Vespra currently knows",
      "The open chat, your name, the mode, and how many turns you have had."),
     ("/history", "[n]", "show the last n lines again",
@@ -157,6 +160,25 @@ class Screen:
         room = self.width - 4
         return text if len(text) <= room else text[: room - 1] + "…"
 
+    def boxed(self, lines: list[str], title: str = "") -> None:
+        """
+        Print lines between two rules. The rule is drawn to fit whatever is
+        inside it, so nothing ever hangs off the end of the line.
+        """
+        shown = [self.fit(line) for line in lines]
+        if title:
+            shown.insert(0, self.fit(title))
+        bar = "─" * min(self.width - 4, max(len(line) for line in shown))
+
+        print(f"  {self.green}{bar}{self.off}")
+        for index, line in enumerate(shown):
+            if not line.strip():
+                print()
+                continue
+            colour = self.bright if title and index == 0 else self.dim
+            print(f"  {colour}{line}{self.off}")
+        print(f"  {self.green}{bar}{self.off}")
+
     def boot(self, status: str) -> None:
         if self.on:
             print("\033[2J\033[H", end="")
@@ -170,13 +192,11 @@ class Screen:
             print(f"  {self.bright}{' '.join(BOT)}{self.off}")
         print()
 
-        bar = "─" * min(54, self.width - 4)
-        print(f"  {self.green}{bar}{self.off}")
-        print(f"  {self.dim}"
-              f"{self.fit(f'local chat terminal   v{VERSION}   engine: c   runner: python {sys.version_info.major}.{sys.version_info.minor}')}"
-              f"{self.off}")
-        print(f"  {self.dim}{self.fit(status)}{self.off}")
-        print(f"  {self.green}{bar}{self.off}")
+        self.boxed([
+            f"local chat terminal   v{VERSION}   engine: c   "
+            f"runner: python {sys.version_info.major}.{sys.version_info.minor}",
+            status,
+        ])
         print(f"  {self.dim}"
               f"{self.fit('/help for commands, /HELP for the long version, /bye to leave')}"
               f"{self.off}")
@@ -285,6 +305,80 @@ class Engine:
 # ------------------------------------------------------------------- chats
 
 
+def blank_stats() -> dict:
+    return {"lines": 0, "chars": 0, "words": 0,
+            "typing_seconds": 0.0, "think_seconds": 0.0,
+            "bot_lines": 0, "bot_chars": 0}
+
+
+def add_stats(into: dict, **amounts: float) -> None:
+    for key, amount in amounts.items():
+        into[key] = into.get(key, 0) + amount
+
+
+def plural(count: float, thing: str) -> str:
+    return f"{count:,} {thing}" + ("" if count == 1 else "s")
+
+
+def spell_time(seconds: float) -> str:
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
+class Config:
+    """
+    Settings that outlive a single run: the mode you were last in, whether she
+    swears, your name, and the running totals /summary reports. Kept in
+    config.json next to run.py.
+    """
+
+    PATH = ROOT / "config.json"
+
+    def __init__(self) -> None:
+        self.mode = "smart"
+        self.swearing = True
+        self.user = ""
+        self.last_chat: str | None = None
+        self.stats = blank_stats()
+        self.mode_use = {name: 0 for name in MODES}
+
+    @classmethod
+    def load(cls) -> "Config":
+        config = cls()
+        try:
+            data = json.loads(cls.PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return config
+
+        if data.get("mode") in MODES:
+            config.mode = data["mode"]
+        config.swearing = bool(data.get("swearing", True))
+        config.user = str(data.get("user", ""))[:40]
+        config.last_chat = data.get("last_chat")
+        config.stats = {**blank_stats(), **data.get("stats", {})}
+        config.mode_use = {**config.mode_use, **data.get("mode_use", {})}
+        return config
+
+    def save(self) -> None:
+        payload = {
+            "mode": self.mode,
+            "swearing": self.swearing,
+            "user": self.user,
+            "last_chat": self.last_chat,
+            "stats": self.stats,
+            "mode_use": self.mode_use,
+        }
+        try:
+            self.PATH.write_text(json.dumps(payload, indent=2) + "\n",
+                                 encoding="utf-8")
+        except OSError:
+            pass          # a read-only folder should not stop the chat
+
+
 class Chat:
     """One conversation: what was said, who said it, and how it is stored."""
 
@@ -295,6 +389,7 @@ class Chat:
         self.swearing: bool = True
         self.created: str = time.strftime("%Y-%m-%d %H:%M")
         self.turns: list[dict] = []
+        self.stats: dict = blank_stats()
 
     # ---- disk
 
@@ -319,6 +414,7 @@ class Chat:
             "swearing": self.swearing,
             "created": self.created,
             "updated": time.strftime("%Y-%m-%d %H:%M"),
+            "stats": self.stats,
             "turns": self.turns,
         }
         self.path_for(self.name).write_text(
@@ -335,6 +431,7 @@ class Chat:
         chat.swearing = data.get("swearing", True)
         chat.created = data.get("created", "")
         chat.turns = data.get("turns", [])
+        chat.stats = {**blank_stats(), **data.get("stats", {})}
         return chat
 
     # ---- content
@@ -360,13 +457,27 @@ class Chat:
 
 class Session:
     def __init__(self, engine: Engine, screen: Screen, compiler: str,
-                 delays: bool) -> None:
+                 delays: bool, config: Config) -> None:
         self.engine = engine
         self.screen = screen
         self.compiler = compiler
         self.delays = delays
+        self.config = config
         self.chat = Chat()
+        self.chat.mode = config.mode
+        self.chat.swearing = config.swearing
+        self.chat.user = config.user
+        self.session = blank_stats()
+        self.started = time.time()
         self.running = True
+
+    def remember_settings(self) -> None:
+        """Keep config.json in step, so the next run starts where this one is."""
+        self.config.mode = self.chat.mode
+        self.config.swearing = self.chat.swearing
+        self.config.user = self.chat.user
+        self.config.last_chat = self.chat.name
+        self.config.save()
 
     # ---- output helpers
 
@@ -381,11 +492,7 @@ class Session:
                 f"lines: {len(self.chat.turns)}")
 
     def show_status(self) -> None:
-        bar = "─" * min(54, self.screen.width - 4)
-        print(f"  {self.screen.green}{bar}{self.screen.off}")
-        print(f"  {self.screen.dim}{self.screen.fit(self.status_line())}"
-              f"{self.screen.off}")
-        print(f"  {self.screen.green}{bar}{self.screen.off}")
+        self.screen.boxed([self.status_line()])
 
     def note(self, text: str) -> None:
         print(f"  {self.screen.dim}{self.screen.fit(text)}{self.screen.off}")
@@ -417,13 +524,14 @@ class Session:
         if remember and lines:
             self.chat.add(PROMPT_BOT, "\n".join(lines))
 
-    def think(self) -> None:
-        """The pause that makes the modes feel like modes."""
+    def think(self) -> float:
+        """The pause that makes the modes feel like modes. Returns its length."""
         pause = MODES[self.chat.mode][0]
         if pause <= 0 or not self.delays or not sys.stdout.isatty():
-            return
+            return 0.0
 
-        end = time.time() + pause
+        began = time.time()
+        end = began + pause
         step = 0
         while time.time() < end:
             dots = "." * (step % 4)
@@ -434,6 +542,7 @@ class Session:
             step += 1
         sys.stdout.write("\r" + " " * 40 + "\r")
         sys.stdout.flush()
+        return time.time() - began
 
     def ask_yes_no(self, question: str) -> bool:
         try:
@@ -472,13 +581,30 @@ class Session:
 
     # ---- the turn
 
-    def user_says(self, text: str) -> None:
+    def user_says(self, text: str, typing_seconds: float = 0.0) -> None:
         self.chat.add("you", text)
         self.learn_name(text)
-        self.think()
+
+        thought = self.think()
         lines, done = self.engine.say(text)
         self.speak(lines)
+
+        counted = dict(
+            lines=1,
+            chars=len(text),
+            words=len(text.split()),
+            typing_seconds=typing_seconds,
+            think_seconds=thought,
+            bot_lines=len(lines),
+            bot_chars=sum(len(line) for line in lines),
+        )
+        for book in (self.session, self.chat.stats, self.config.stats):
+            add_stats(book, **counted)
+        self.config.mode_use[self.chat.mode] = \
+            self.config.mode_use.get(self.chat.mode, 0) + 1
+
         self.chat.save()
+        self.config.save()
         if done:
             self.running = False
 
@@ -493,6 +619,7 @@ class Session:
             return
         self.chat.user = name
         self.push_state()
+        self.remember_settings()
 
     # ---- commands
 
@@ -551,6 +678,7 @@ class Session:
         first_time = self.chat.name != name
         self.chat.name = name
         self.chat.save()
+        self.remember_settings()
         self.note(f"saved as {name} ({len(self.chat.turns)} lines)"
                   + (" -- it will keep saving itself now" if first_time else ""))
         self.show_status()
@@ -574,6 +702,7 @@ class Session:
             return
 
         self.replay()
+        self.remember_settings()
         self.note(f"opened {arg}")
         self.show_status()
         self.show_history(6)
@@ -693,6 +822,7 @@ class Session:
         self.chat.user = arg[:40]
         self.push_state()
         self.chat.save()
+        self.remember_settings()
         self.note(f"hello, {self.chat.user}!")
         self.show_status()
 
@@ -710,6 +840,7 @@ class Session:
         self.chat.mode = want
         self.push_state()
         self.chat.save()
+        self.remember_settings()
         self.note(f"mode {want}: {MODES[want][1]}")
         self.show_status()
 
@@ -723,8 +854,66 @@ class Session:
         self.chat.swearing = arg.lower() not in ("off", "no", "false", "0")
         self.push_state()
         self.chat.save()
+        self.remember_settings()
         self.note("alright, I will swear back" if self.chat.swearing
                   else "fine, keeping it clean from here")
+
+    def cmd_summary(self) -> None:
+        """Who did how much of the talking, and how long everybody took."""
+        session, chat, all_time = self.session, self.chat.stats, self.config.stats
+        elapsed = time.time() - self.started
+
+        def typing_speed(book: dict) -> str:
+            minutes = book["typing_seconds"] / 60
+            if minutes < 0.05 or book["words"] < 5:
+                return "not enough typing to tell yet"
+            wpm = book["words"] / minutes
+            cpm = book["chars"] / minutes
+            return f"{wpm:.0f} wpm ({cpm:.0f} characters a minute)"
+
+        lines = [
+            "this session",
+            f"    chatting for       {spell_time(elapsed)}",
+            f"    you said           {plural(session['lines'], 'line')}, "
+            f"{plural(session['chars'], 'character')}, "
+            f"{plural(session['words'], 'word')}",
+            f"    typing speed       {typing_speed(session)}",
+            f"    she thought for    {spell_time(session['think_seconds'])}"
+            f"   (mode {self.chat.mode})",
+            f"    she said           {plural(session['bot_lines'], 'line')}, "
+            f"{plural(session['bot_chars'], 'character')}",
+            "",
+            f"this chat ({self.chat.name or 'unsaved'})",
+            f"    started            {self.chat.created}",
+            f"    lines              {len(self.chat.turns)} in total, "
+            f"{chat['lines']:,} from you",
+            f"    you have typed     {plural(chat['chars'], 'character')}, "
+            f"{plural(chat['words'], 'word')}",
+            f"    typing speed       {typing_speed(chat)}",
+            f"    she has thought    {spell_time(chat['think_seconds'])}",
+            "",
+            "all time",
+            f"    saved chats        {len(Chat.saved_names())}",
+            f"    you have typed     {plural(all_time['chars'], 'character')} "
+            f"over {plural(all_time['lines'], 'line')}",
+            f"    typing speed       {typing_speed(all_time)}",
+            f"    she has thought    {spell_time(all_time['think_seconds'])}",
+            f"    she has typed      {plural(all_time['bot_chars'], 'character')} back",
+            f"    favourite mode     {self.favourite_mode()}",
+        ]
+
+        print()
+        self.screen.boxed(lines, title="summary")
+        if not sys.stdin.isatty():
+            self.note("(typing speed only counts when you are really typing)")
+        print()
+
+    def favourite_mode(self) -> str:
+        used = self.config.mode_use
+        if not any(used.values()):
+            return "none yet"
+        best = max(used, key=lambda name: used[name])
+        return f"{best} ({used[best]:,} of {sum(used.values()):,} turns)"
 
     def cmd_who(self) -> None:
         lines = self.chat.turns
@@ -773,6 +962,7 @@ class Session:
             self.note(f"saved as {self.chat.name}")
         elif self.chat.turns:
             self.note("this chat was not saved (/save mychat next time)")
+        self.remember_settings()
         print(f"{self.screen.bright}{PROMPT_BOT}> "
               f"See you{', ' + self.chat.user if self.chat.user else ''}! "
               f"Come back whenever.{self.screen.off}")
@@ -816,6 +1006,8 @@ class Session:
             self.cmd_mode(key)
         elif key == "swear":
             self.cmd_swear(arg)
+        elif key in ("summary", "stats"):
+            self.cmd_summary()
         elif key == "who":
             self.cmd_who()
         elif key == "history":
@@ -851,7 +1043,10 @@ class Session:
                       f"{self.chat.mode} {self.screen.off}"
                       f"{self.screen.you}you> {self.screen.off}",
                       end="", flush=True)
+                asked_at = time.time()
                 text = input()
+                typing_seconds = (time.time() - asked_at
+                                  if sys.stdin.isatty() else 0.0)
                 if not sys.stdin.isatty():
                     print(text)         # piped input is not echoed for us
             except (EOFError, KeyboardInterrupt):
@@ -865,7 +1060,7 @@ class Session:
             if text.strip().startswith("/"):
                 self.command(text.strip())
             else:
-                self.user_says(text)
+                self.user_says(text, typing_seconds)
 
         self.engine.close()
         return 0
@@ -879,7 +1074,8 @@ def main() -> int:
         description=f"{BOT} -- a local chat bot. The engine is C, this runner is Python."
     )
     parser.add_argument("--open", metavar="CHAT", help="open a saved chat on startup")
-    parser.add_argument("--mode", choices=sorted(MODES), help="start in this mode")
+    parser.add_argument("--mode", choices=sorted(MODES),
+                        help="start in this mode, instead of the saved one")
     parser.add_argument("--rebuild", action="store_true",
                         help="recompile the engine even if it looks up to date")
     parser.add_argument("--no-color", action="store_true",
@@ -908,6 +1104,7 @@ def main() -> int:
         build(compiler)
 
     screen = Screen(enabled=not args.no_color and sys.stdout.isatty())
+    config = Config.load()
 
     try:
         engine = Engine()
@@ -916,7 +1113,8 @@ def main() -> int:
         return 1
 
     session = Session(engine, screen, compiler,
-                      delays=not args.no_delay and sys.stdout.isatty())
+                      delays=not args.no_delay and sys.stdout.isatty(),
+                      config=config)
 
     if args.open:
         if Chat.path_for(args.open).exists():
@@ -929,6 +1127,7 @@ def main() -> int:
         session.chat.mode = args.mode
 
     session.push_state()
+    session.remember_settings()
     return session.run()
 
 

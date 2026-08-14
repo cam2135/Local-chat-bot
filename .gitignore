@@ -1,8 +1,9 @@
 # compiled engine
 build/
 
-# your conversations
+# your conversations and settings
 chats/
+config.json
 *.txt
 
 __pycache__/

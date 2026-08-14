@@ -174,6 +174,44 @@ check("/swear off keeps it clean",
 check("stays polite by default in ordinary chat",
       not any(word in out.lower() for word in ("fuck", "shit", "bloody")))
 
+print("settings that stick:")
+say(["/pro", "/swear off", "/name Testy", "/bye"])
+again = say(["/who", "/bye"])
+check("mode survives closing the app", "mode     pro" in again)
+check("swearing setting survives", "swearing off" in again)
+check("your name survives", "you      Testy" in again)
+check("config file written", (sandbox / "config.json").exists())
+fresh = say(["/smart", "/swear on", "/name off", "/bye"])
+check("changing it back sticks too", "mode smart" in fresh)
+
+print("summary:")
+summed = say(["hello there you", "i am typing some words at you now",
+              "/summary", "/bye"])
+check("/summary reports thinking time", "she thought for" in summed)
+check("/summary counts what you typed",
+      "characters" in summed and "words" in summed)
+check("/summary mentions words a minute",
+      "typing speed" in summed and "wpm" in summed.lower()
+      or "not enough typing" in summed)
+check("/summary covers session, chat and all time",
+      "this session" in summed and "this chat" in summed
+      and "all time" in summed)
+check("/summary counts characters, not zero",
+      any(line.strip().startswith("you said") and "0 characters" not in line
+          for line in summed.splitlines()))
+
+print("layout:")
+laid = say(["/bye"])
+rules = [line.strip() for line in laid.splitlines()
+         if line.strip().startswith("─")]
+boxed = laid.splitlines()
+check("nothing hangs off the rule", all(
+    len(boxed[i].strip()) <= len(rules[0])
+    for i in range(boxed.index("  " + rules[0]) + 1,
+                   len(boxed)) if boxed[i].strip().startswith(("local chat",
+                                                               "chat:"))),
+      "the header lines must fit inside the ─── rule")
+
 print("live status:")
 status = say(["/pro", "/save trial", "/who", "/bye"])
 check("prompt shows the mode you switched to", "trial\u00b7pro you>" in status
