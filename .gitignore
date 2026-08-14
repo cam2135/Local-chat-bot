@@ -1,8 +1,9 @@
 # compiled engine
 build/
 
-# saved conversations
-chat-log-*.txt
+# your conversations
+chats/
+*.txt
 
 __pycache__/
 *.pyc

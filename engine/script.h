@@ -1,9 +1,9 @@
 /*
- * script.h -- the ELIZA script.
+ * script.h -- Vespra's script.
  *
  * This is the "personality" of the bot: a table of keywords, each with a list
  * of decomposition patterns and the reassembly templates used to answer them.
- * It follows the shape of Weizenbaum's original 1966 DOCTOR script.
+ * It follows the shape of the 1960s keyword-and-decomposition chat scripts.
  *
  * Patterns are word lists where '*' matches zero or more words. Captures are
  * numbered by the order the '*' appears, so in "* i am *" the text after
@@ -110,7 +110,11 @@ static const Swap CONTRACTIONS[] = {
 
 /* Said when the user opens the conversation. */
 static const char *GREETING =
-    "Hello. I am ELIZA. Tell me what is on your mind.";
+    "Hello. I am Vespra. Tell me what is on your mind.";
+
+/* Said when a saved conversation is reopened. */
+static const char *WELCOME_BACK =
+    "We were talking before. I still have it. Go on.";
 
 /* Said on the way out. */
 static const char *FAREWELLS[] = {
@@ -128,6 +132,29 @@ static const char *FALLBACKS[] = {
     "Does talking about this bother you?",
     "That is interesting. Please continue.",
     "What does that suggest to you?",
+    NULL
+};
+
+/* Fast mode wants as few words as possible. */
+static const char *FAST_FALLBACKS[] = {
+    "Go on.",
+    "I see.",
+    "Such as?",
+    "And?",
+    "Say more.",
+    NULL
+};
+
+/* Pro mode adds a second, slower thought to whatever it just said. */
+static const char *PRO_PROBES[] = {
+    "Sit with that for a moment. What is underneath it?",
+    "You have told me what happened. You have not told me how it left you.",
+    "Notice that you said that plainly, with no feeling attached. Why?",
+    "If someone else described this to you, what would you ask them first?",
+    "What would have to change for this to stop mattering?",
+    "There is a version of this story where you are not at fault. What is it?",
+    "You keep circling the same point. What are you circling around?",
+    "What is the part of this you have not said out loud yet?",
     NULL
 };
 

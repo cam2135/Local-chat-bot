@@ -1,5 +1,5 @@
 /*
- * eliza.c -- the chat "model": an ELIZA in C.
+ * vespra.c -- the chat "model": a keyword-and-pattern conversationalist in C.
  *
  * How a turn works:
  *   1. the line is normalised (lower case, punctuation turned into clause marks)
@@ -8,14 +8,22 @@
  *   4. that keyword's decomposition patterns are matched, captures have their
  *      pronouns swapped, and a reassembly template is filled in
  *   5. if nothing matches we bring up a remembered "my ..." line, or fall back
+ *   6. the answer is shaped by the current mode: clipped short for fast,
+ *      left alone for smart, given a second thought for pro
  *
- * It talks to run.py over stdin/stdout. Each reply is one or more lines
- * followed by a sentinel line, so multi line code replies stay in one piece:
+ * It talks to run.py over stdin/stdout. Lines coming in are either
+ *
+ *   >text     something the person said
+ *   !command  a control line from the runner (see control() below)
+ *
+ * and a bare line with no prefix is treated as speech, so the program is still
+ * usable on its own: ./build/vespra and type at it.
+ *
+ * Each reply is one or more lines followed by a sentinel, so multi line code
+ * replies stay in one piece:
  *
  *   --END--        end of a normal turn
  *   --END--QUIT--  the conversation is over
- *
- * The program is also usable on its own: ./build/eliza and type at it.
  */
 #include <stdio.h>
 #include <string.h>
@@ -34,12 +42,20 @@
 #define END_NORMAL "--END--"
 #define END_QUIT   "--END--QUIT--"
 
+typedef enum { MODE_FAST, MODE_SMART, MODE_PRO } Mode;
+
 /* Rotating reassembly cursors, one per rule, so replies cycle in order. */
 static int reasmb_cursor[sizeof KEYWORDS / sizeof KEYWORDS[0]][MAX_RULES];
 static int fallback_cursor;
 static int farewell_cursor;
 static int memory_cursor;
+static int probe_cursor;
 static int unmatched_turns;
+
+/* Set by the runner: how hard to think, and who it is talking to. */
+static Mode mode = MODE_SMART;
+static char user_name[64];
+static long turn_no;
 
 /* Remembered "my ..." lines, used when the user says something unrecognised. */
 static char memory[MEM_SLOTS][MAX_LINE];
@@ -470,15 +486,95 @@ static int answer_clause(char *clause, char *out, size_t outsz)
 
 static void fallback(char *out, size_t outsz)
 {
+    const char **list = (mode == MODE_FAST) ? FAST_FALLBACKS : FALLBACKS;
     int count = 0;
 
-    if (unmatched_turns % 2 == 1 && recall(out, outsz))
+    if (mode != MODE_FAST && unmatched_turns % 2 == 1 && recall(out, outsz))
         return;
 
-    while (FALLBACKS[count] != NULL)
+    while (list[count] != NULL)
         count++;
-    snprintf(out, outsz, "%s", FALLBACKS[fallback_cursor % count]);
+    snprintf(out, outsz, "%s", list[fallback_cursor % count]);
     fallback_cursor = (fallback_cursor + 1) % count;
+}
+
+/* ------------------------------------------------------------- the modes */
+
+/* Keep only the first sentence, for fast mode. */
+static void clip_to_sentence(char *s)
+{
+    for (size_t i = 0; s[i] != '\0'; i++) {
+        if (s[i] == '.' || s[i] == '?' || s[i] == '!') {
+            s[i + 1] = '\0';
+            return;
+        }
+        if (s[i] == '\n') {
+            s[i] = '\0';
+            return;
+        }
+    }
+}
+
+/* "How long have you been sad?" -> "Cam, how long have you been sad?" */
+static void address_by_name(char *s, size_t sz)
+{
+    char body[MAX_REPLY];
+    char joined[MAX_REPLY + sizeof user_name + 4];
+    int keep_capital;
+
+    if (user_name[0] == '\0' || s[0] == '\0')
+        return;
+
+    keep_capital = (s[0] == 'I' && (s[1] == ' ' || s[1] == '\'' || s[1] == '\0'));
+
+    snprintf(body, sizeof body, "%s", s);
+    if (!keep_capital)
+        body[0] = (char)tolower((unsigned char)body[0]);
+
+    snprintf(joined, sizeof joined, "%s, %s", user_name, body);
+    snprintf(s, sz, "%.*s", (int)sz - 1, joined);   /* clipping here is fine */
+}
+
+/* Pro mode says the ordinary thing, then keeps thinking about it. */
+static void add_second_thought(char *s, size_t sz)
+{
+    char tail[MAX_LINE] = "";
+    int count = 0;
+
+    while (PRO_PROBES[count] != NULL)
+        count++;
+
+    if (turn_no % 4 == 3 && recall(tail, sizeof tail)) {
+        /* every so often, bring back something they said earlier instead */
+        size_t n = strlen(s);
+        snprintf(s + n, sz - n, "\n%s", tail);
+        return;
+    }
+
+    {
+        size_t n = strlen(s);
+        snprintf(s + n, sz - n, "\n%s", PRO_PROBES[probe_cursor % count]);
+        probe_cursor = (probe_cursor + 1) % count;
+    }
+}
+
+/* Apply whatever the current mode does to a finished prose reply. */
+static void shape_reply(char *s, size_t sz)
+{
+    switch (mode) {
+    case MODE_FAST:
+        clip_to_sentence(s);
+        break;
+    case MODE_SMART:
+        if (turn_no % 3 == 2)
+            address_by_name(s, sz);
+        break;
+    case MODE_PRO:
+        if (turn_no % 2 == 1)
+            address_by_name(s, sz);
+        add_second_thought(s, sz);
+        break;
+    }
 }
 
 /*
@@ -493,6 +589,7 @@ static int respond(const char *raw, char *out, size_t outsz)
     char *clauses[8];
     int nclauses;
 
+    turn_no++;
     normalize(raw, rough, sizeof rough);
     expand_contractions(rough, norm, sizeof norm);
 
@@ -540,13 +637,79 @@ static int respond(const char *raw, char *out, size_t outsz)
     for (int i = 0; i < nclauses; i++) {
         if (answer_clause(clauses[i], out, outsz)) {
             unmatched_turns = 0;
+            shape_reply(out, outsz);
             return 0;
         }
     }
 
     unmatched_turns++;
     fallback(out, outsz);
+    shape_reply(out, outsz);
     return 0;
+}
+
+/* ---------------------------------------------------------------- control */
+
+/*
+ * Lines from the runner that are settings rather than speech:
+ *
+ *   !mode fast|smart|pro   how much effort to put into an answer
+ *   !name <who>            what to call the person
+ *   !replay <text>         feed a line from a saved chat back in, silently,
+ *                          so reopening a conversation restores the memory
+ *   !hello                 print the greeting again
+ *   !back                  print the "we were talking before" line
+ *
+ * Anything unknown is ignored. Control lines answer with the sentinel only,
+ * so the runner can read them and throw the empty reply away.
+ */
+static void control(const char *line, char *out, size_t outsz)
+{
+    out[0] = '\0';
+
+    if (strncmp(line, "mode ", 5) == 0) {
+        const char *want = line + 5;
+        if (strcmp(want, "fast") == 0)
+            mode = MODE_FAST;
+        else if (strcmp(want, "pro") == 0)
+            mode = MODE_PRO;
+        else
+            mode = MODE_SMART;
+        return;
+    }
+
+    if (strncmp(line, "name ", 5) == 0) {
+        snprintf(user_name, sizeof user_name, "%.*s",
+                 (int)sizeof user_name - 1, line + 5);
+        return;
+    }
+
+    if (strcmp(line, "name") == 0) {
+        user_name[0] = '\0';
+        return;
+    }
+
+    if (strncmp(line, "replay ", 7) == 0) {
+        char scratch[MAX_REPLY];
+        Mode saved = mode;
+
+        /* Replaying rebuilds the memory and the reply rotations without
+           printing anything, and without pro mode's extra thoughts. */
+        mode = MODE_SMART;
+        respond(line + 7, scratch, sizeof scratch);
+        mode = saved;
+        return;
+    }
+
+    if (strcmp(line, "hello") == 0) {
+        snprintf(out, outsz, "%s", GREETING);
+        return;
+    }
+
+    if (strcmp(line, "back") == 0) {
+        snprintf(out, outsz, "%s", WELCOME_BACK);
+        return;
+    }
 }
 
 /* ------------------------------------------------------------------ main */
@@ -569,7 +732,17 @@ int main(void)
             line[--len] = '\0';
 
         reply[0] = '\0';
-        done = respond(line, reply, sizeof reply);
+
+        if (line[0] == '!') {
+            control(line + 1, reply, sizeof reply);
+            if (reply[0] != '\0')
+                printf("%s\n", reply);
+            printf("%s\n", END_NORMAL);
+            fflush(stdout);
+            continue;
+        }
+
+        done = respond(line[0] == '>' ? line + 1 : line, reply, sizeof reply);
 
         printf("%s\n%s\n", reply, done ? END_QUIT : END_NORMAL);
         fflush(stdout);
