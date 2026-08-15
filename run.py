@@ -32,19 +32,28 @@ ENGINE_DIR = ROOT / "engine"
 BUILD_DIR = ROOT / "build"
 CHAT_DIR = ROOT / "chats"
 BINARY = BUILD_DIR / ("vespra.exe" if os.name == "nt" else "vespra")
-SOURCES = [ENGINE_DIR / "vespra.c", ENGINE_DIR / "codegen.c"]
-HEADERS = [ENGINE_DIR / "script.h", ENGINE_DIR / "codegen.h"]
+TRAINER = BUILD_DIR / ("train.exe" if os.name == "nt" else "train")
+MODEL_DIR = ROOT / "model"
+MODEL = MODEL_DIR / "vespra.lm"
+DATA_DIR = ROOT / "data"
+CORPUS = DATA_DIR / "corpus.bin"
+PREPARE = ROOT / "train" / "prepare.py"
+
+SOURCES = [ENGINE_DIR / "vespra.c", ENGINE_DIR / "codegen.c",
+           ENGINE_DIR / "tinylm.c"]
+TRAIN_SOURCES = [ENGINE_DIR / "train_lm.c", ENGINE_DIR / "tinylm.c"]
+HEADERS = [ENGINE_DIR / "codegen.h", ENGINE_DIR / "tinylm.h"]
 
 END_NORMAL = "--END--"
 END_QUIT = "--END--QUIT--"
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 
-# name -> (pause before answering, one line description)
+# name -> (candidates the model draws, one line description)
 MODES = {
-    "fast":  (0.0, "short answers, no waiting"),
-    "smart": (0.9, "the full answer, after a moment's thought"),
-    "pro":   (3.0, "the long look: an answer plus a second thought"),
+    "fast":  (1, "one draw from the model, straight back to you"),
+    "smart": (3, "draws 3 answers and keeps the best one"),
+    "pro":   (8, "draws 8 and keeps the best -- slowest, and it shows"),
 }
 
 # Every command in one place, so /help and /HELP are always accurate.
@@ -59,9 +68,8 @@ COMMANDS = [
      "  every turn from then on. Once a chat has a name, plain /save is enough.\n"
      "  /save_work does the same thing as /save work."),
     ("/open", "<chatname>", "reopen a saved conversation",
-     "Loads the conversation back, and quietly feeds every earlier line through\n"
-     "  the engine again so it remembers what you told it -- what you said about\n"
-     "  \"my ...\" comes back, and replies carry on rotating where they left off."),
+     "Loads the conversation back and feeds it through the model again, so it\n"
+     "  carries on with the conversation in mind rather than from nothing."),
     ("/list", "", "list your saved chats",
      "Shows each saved chat with its turn count, mode and when it was last used."),
     ("/rm", "<chatname>|ALL", "delete a saved chat, or all of them",
@@ -74,19 +82,19 @@ COMMANDS = [
     ("/name", "<yourname>", "tell Vespra what to call you",
      "It will use your name in conversation now and then. /name on its own tells\n"
      "  you the name it has; /name off forgets it. Saved with the chat."),
-    ("/mode", "fast|smart|pro", "how hard Vespra thinks",
-     "Or use /fast, /smart and /pro directly. /mode on its own shows the current\n"
-     "  one. Saved with the chat."),
+    ("/mode", "fast|smart|pro", "how hard the model thinks",
+     "fast draws one answer, smart draws 3 and keeps the best, pro draws 8. More\n"
+     "  candidates means better answers and a longer wait -- real work, not a\n"
+     "  fake pause. /mode on its own shows the current one. Saved with the chat."),
     ("/fast", "", "switch to fast mode", "Same as /mode fast."),
     ("/smart", "", "switch to smart mode", "Same as /mode smart."),
     ("/pro", "", "switch to pro mode", "Same as /mode pro."),
     ("/code", "<lang> <thing>", "ask for a code snippet outright",
      "For example /code css dark mode. Python, JavaScript, HTML and CSS.\n"
      "  You can also just say \"make me a button in css\" in normal conversation."),
-    ("/swear", "on|off", "whether she swears back at you",
-     "On by default: swear at her and she gives it back, harder the longer you\n"
-     "  keep it up, and she settles down again once you do. /swear off keeps her\n"
-     "  clean whatever you say."),
+    ("/swear", "on|off", "let her use the language she learned",
+     "She learned to talk from film dialogue, so she swears sometimes. /swear off\n"
+     "  filters it out: any reply with swearing in it is thrown away and resampled."),
     ("/summary", "", "who did the talking, and how long it took",
      "How long she has spent thinking, how much you have typed, your average\n"
      "  words a minute, and the same again for this chat and for all time."),
@@ -98,6 +106,12 @@ COMMANDS = [
      "Defaults to <chatname>.txt, or chat-<date>.txt if the chat has no name."),
     ("/clear", "", "clear the screen",
      "Redraws the boot screen. The conversation is not touched."),
+    ("/train", "[minutes]", "train the model for longer",
+     "Carries on training the neural net from where it got to, for however many\n"
+     "  minutes you give it (20 by default). The longer it trains, the better it\n"
+     "  talks. Ctrl-C stops it early and keeps everything learned so far."),
+    ("/model", "", "what the model actually is",
+     "Its size, how many training steps it has had, and how much text it has read."),
     ("/rebuild", "", "recompile the C engine",
      "Rebuilds engine/*.c and restarts it, keeping the conversation you are in."),
     ("/bye", "", "save and leave",
@@ -223,30 +237,70 @@ def find_compiler(preferred: str | None) -> str | None:
 
 
 def needs_build() -> bool:
-    """True when the binary is missing or older than any source file."""
-    if not BINARY.exists():
+    """True when either binary is missing or older than any source file."""
+    if not BINARY.exists() or not TRAINER.exists():
         return True
-    built = BINARY.stat().st_mtime
-    return any(path.stat().st_mtime > built for path in SOURCES + HEADERS)
+    built = min(BINARY.stat().st_mtime, TRAINER.stat().st_mtime)
+    return any(path.stat().st_mtime > built
+               for path in SOURCES + TRAIN_SOURCES + HEADERS)
+
+
+def compile_one(compiler: str, target: Path, sources: list[Path],
+                extra: list[str]) -> subprocess.CompletedProcess:
+    command = [compiler, "-O3", "-ffast-math", "-std=c99", "-Wall", "-Wextra",
+               *extra, "-o", str(target), *[str(s) for s in sources], "-lm"]
+    return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
 
 def build(compiler: str, quiet: bool = False) -> None:
-    """Compile the engine, or exit with the compiler's own error output."""
+    """
+    Compile the chat engine and the trainer. Matrix multiplication is the whole
+    job here, so we ask for OpenMP and fall back quietly if this compiler has
+    not got it.
+    """
     BUILD_DIR.mkdir(exist_ok=True)
-    command = [compiler, "-O2", "-std=c99", "-Wall", "-Wextra",
-               "-o", str(BINARY), *[str(path) for path in SOURCES]]
-
     if not quiet:
-        print(f"building the engine with {Path(compiler).name} ...")
+        print(f"building with {Path(compiler).name} ...")
 
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
-    if result.returncode != 0:
-        print("The engine did not compile:\n", file=sys.stderr)
-        print(result.stdout + result.stderr, file=sys.stderr)
-        sys.exit(1)
+    for target, sources in ((BINARY, SOURCES), (TRAINER, TRAIN_SOURCES)):
+        result = compile_one(compiler, target, sources, ["-fopenmp"])
+        if result.returncode != 0:
+            result = compile_one(compiler, target, sources, [])
+        if result.returncode != 0:
+            print(f"{target.name} did not compile:\n", file=sys.stderr)
+            print(result.stdout + result.stderr, file=sys.stderr)
+            sys.exit(1)
 
-    if result.stderr.strip() and not quiet:
-        print(result.stderr.strip())
+
+def prepare_data(quiet: bool = False) -> bool:
+    """Build data/corpus.bin if it is not there yet."""
+    if CORPUS.exists():
+        return True
+    print("preparing the training data (this downloads the corpus once) ...")
+    result = subprocess.run([sys.executable, str(PREPARE)], cwd=ROOT)
+    return result.returncode == 0 and CORPUS.exists()
+
+
+def train(minutes: float, compiler: str, resume: bool = True) -> bool:
+    """Run the trainer, showing its progress live."""
+    if not prepare_data():
+        print("could not prepare the training data", file=sys.stderr)
+        return False
+    if not TRAINER.exists():
+        build(compiler)
+
+    MODEL_DIR.mkdir(exist_ok=True)
+    command = [str(TRAINER), "--minutes", str(minutes)]
+    if resume and MODEL.exists():
+        command.append("--resume")
+
+    print()
+    try:
+        subprocess.run(command, cwd=ROOT)
+    except KeyboardInterrupt:
+        print("\nstopped -- what it learned so far is saved")
+    print()
+    return MODEL.exists()
 
 
 # ------------------------------------------------------------- the engine io
@@ -263,7 +317,7 @@ class Engine:
             text=True,
             bufsize=1,
         )
-        self.read()  # the greeting it prints on startup
+        # It says nothing until it is asked, so there is nothing to read here.
 
     def read(self) -> tuple[list[str], bool]:
         """Read reply lines up to the sentinel. Second value: chat is over."""
@@ -524,25 +578,19 @@ class Session:
         if remember and lines:
             self.chat.add(PROMPT_BOT, "\n".join(lines))
 
-    def think(self) -> float:
-        """The pause that makes the modes feel like modes. Returns its length."""
-        pause = MODES[self.chat.mode][0]
-        if pause <= 0 or not self.delays or not sys.stdout.isatty():
-            return 0.0
+    def show_thinking(self) -> None:
+        """Say something is happening while the model actually computes."""
+        if not sys.stdout.isatty():
+            return
+        sys.stdout.write(f"{self.screen.dim}{PROMPT_BOT}> thinking ..."
+                         f"{self.screen.off}")
+        sys.stdout.flush()
 
-        began = time.time()
-        end = began + pause
-        step = 0
-        while time.time() < end:
-            dots = "." * (step % 4)
-            sys.stdout.write(f"\r{self.screen.dim}{PROMPT_BOT}> "
-                             f"thinking{dots:<3}{self.screen.off}")
-            sys.stdout.flush()
-            time.sleep(0.18)
-            step += 1
+    def clear_thinking(self) -> None:
+        if not sys.stdout.isatty():
+            return
         sys.stdout.write("\r" + " " * 40 + "\r")
         sys.stdout.flush()
-        return time.time() - began
 
     def ask_yes_no(self, question: str) -> bool:
         try:
@@ -574,10 +622,13 @@ class Session:
     def replay(self) -> None:
         """Feed a reopened chat back through a fresh engine, silently."""
         self.restart_engine()
-        for line in self.chat.said_by_user():
-            if line.startswith("/"):
+        self.engine.control("forget")
+        for turn in self.chat.turns:
+            text = turn["text"].replace("\n", " ").strip()
+            if not text or text.startswith("/"):
                 continue
-            self.engine.control("replay " + line)
+            who = "you" if turn["who"] == "you" else "bot"
+            self.engine.control(f"replay {who} {text}")
 
     # ---- the turn
 
@@ -585,8 +636,11 @@ class Session:
         self.chat.add("you", text)
         self.learn_name(text)
 
-        thought = self.think()
+        self.show_thinking()
+        began = time.time()
         lines, done = self.engine.say(text)
+        thought = time.time() - began
+        self.clear_thinking()
         self.speak(lines)
 
         counted = dict(
@@ -646,13 +700,13 @@ class Session:
             print()
 
         self.note("modes")
-        for name, (pause, description) in MODES.items():
-            wait = "no pause" if pause == 0 else f"~{pause:g}s pause"
+        for name, (draws, description) in MODES.items():
             print(f"  {self.screen.bright}{name:<8}{self.screen.off}"
-                  f"{self.screen.dim}{description} ({wait}){self.screen.off}")
-        self.para(f"Modes change how much {BOT.title()} says and how long it "
-                  f"waits, not how clever\nit is underneath -- it is a pattern "
-                  f"matcher either way.")
+                  f"{self.screen.dim}{description}{self.screen.off}")
+        self.para("Every mode runs the same trained network. The difference is "
+                  "how many\nanswers it samples before picking one, so pro really "
+                  "does think longer\n-- that is where the wait comes from, not a "
+                  "sleep.")
         print()
 
         self.note("talking to it")
@@ -828,9 +882,9 @@ class Session:
 
     def cmd_mode(self, arg: str) -> None:
         if not arg:
-            pause, description = MODES[self.chat.mode]
-            self.note(f"mode {self.chat.mode}: {description}"
-                      + ("" if pause == 0 else f" (~{pause:g}s)"))
+            draws, description = MODES[self.chat.mode]
+            self.note(f"mode {self.chat.mode}: {description} "
+                      f"({draws} candidate{'' if draws == 1 else 's'})")
             return
         want = arg.lower()
         if want not in MODES:
@@ -915,6 +969,30 @@ class Session:
         best = max(used, key=lambda name: used[name])
         return f"{best} ({used[best]:,} of {sum(used.values()):,} turns)"
 
+    def cmd_train(self, arg: str) -> None:
+        try:
+            minutes = float(arg) if arg else 20.0
+        except ValueError:
+            self.note("how many minutes? try /train 20")
+            return
+        if minutes <= 0:
+            self.note("how many minutes? try /train 20")
+            return
+
+        self.note(f"training for {minutes:g} minutes -- Ctrl-C stops early "
+                  f"and keeps what it learned")
+        train(minutes, self.compiler)
+        self.replay()          # pick the new weights up straight away
+        self.note("back with the newly trained model")
+        self.cmd_model()
+
+    def cmd_model(self) -> None:
+        lines = self.engine.control("info")
+        if not lines:
+            self.note("no model loaded")
+            return
+        self.screen.boxed(lines, title="the model")
+
     def cmd_who(self) -> None:
         lines = self.chat.turns
         yours = sum(1 for t in lines if t["who"] == "you")
@@ -925,6 +1003,9 @@ class Session:
         self.note(f"swearing {'on' if self.chat.swearing else 'off'}")
         self.note(f"lines    {len(lines)} ({yours} from you)")
         self.note(f"started  {self.chat.created}")
+        info = self.engine.control("info")
+        if info:
+            self.note(f"model    {info[0]}")
         print()
 
     def show_history(self, count: int) -> None:
@@ -1006,6 +1087,10 @@ class Session:
             self.cmd_mode(key)
         elif key == "swear":
             self.cmd_swear(arg)
+        elif key == "train":
+            self.cmd_train(arg)
+        elif key == "model":
+            self.cmd_model()
         elif key in ("summary", "stats"):
             self.cmd_summary()
         elif key == "who":
@@ -1059,6 +1144,10 @@ class Session:
 
             if text.strip().startswith("/"):
                 self.command(text.strip())
+            elif text.strip().lower() in ("bye", "goodbye", "bye!", "cya",
+                                          "see you", "good night", "goodnight"):
+                self.user_says(text, typing_seconds)
+                self.cmd_bye()
             else:
                 self.user_says(text, typing_seconds)
 
@@ -1076,6 +1165,10 @@ def main() -> int:
     parser.add_argument("--open", metavar="CHAT", help="open a saved chat on startup")
     parser.add_argument("--mode", choices=sorted(MODES),
                         help="start in this mode, instead of the saved one")
+    parser.add_argument("--train", metavar="MINUTES", type=float,
+                        help="train the model for this many minutes, then chat")
+    parser.add_argument("--prepare", action="store_true",
+                        help="just build the training data and exit")
     parser.add_argument("--rebuild", action="store_true",
                         help="recompile the engine even if it looks up to date")
     parser.add_argument("--no-color", action="store_true",
@@ -1103,6 +1196,12 @@ def main() -> int:
     if args.rebuild or needs_build():
         build(compiler)
 
+    if args.prepare:
+        return 0 if prepare_data() else 1
+
+    if args.train:
+        train(args.train, compiler)
+
     screen = Screen(enabled=not args.no_color and sys.stdout.isatty())
     config = Config.load()
 
@@ -1128,6 +1227,17 @@ def main() -> int:
 
     session.push_state()
     session.remember_settings()
+
+    if not MODEL.exists():
+        print()
+        print(f"  {screen.dim}There is no trained model yet -- I have nothing "
+              f"to think with.{screen.off}")
+        print(f"  {screen.dim}Train one now with:  "
+              f"{screen.off}{screen.bright}python3 run.py --train 30{screen.off}")
+        print(f"  {screen.dim}Twenty minutes gets you something that talks; "
+              f"an hour or two is better.{screen.off}")
+        print()
+
     return session.run()
 
 

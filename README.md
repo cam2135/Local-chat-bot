@@ -1,8 +1,11 @@
 # Vespra
 
-A small chat bot you run in your own terminal. She is friendly — nosy, warm,
-quick with an opinion and a bad joke — not one of those bots that only ever asks
-how that makes you feel. Written in C, with an old green screen to match.
+A small language model you train yourself, and then chat with in your terminal.
+
+Not a wrapper around somebody else's model — there is no Ollama here, nothing is
+downloaded from Hugging Face, no API key, no network at chat time. The neural
+network is about 1,300 lines of C in `engine/`, it starts from random numbers,
+and it learns to talk by reading 250,000 real conversations on your own machine.
 
 ```
   v     v  eeeeeee   sssss   pppppp   rrrrrr     aaa
@@ -19,48 +22,77 @@ how that makes you feel. Written in C, with an old green screen to match.
   ────────────────────────────────────────────────────────────
 ```
 
-Every big letter is drawn out of little copies of itself. The bar under it, and
-the `unsaved·smart` in front of the prompt, are rebuilt from the live state every
-time they are drawn, so they always show the chat and mode you are actually in.
+## What it actually is
 
-```
-vespra> Hey! I am Vespra. What is going on with you today?
-unsaved·smart you> my name is Sam
-vespra> Nice to meet you properly!
-unsaved·smart you> i am tired
-vespra> Sam, long day? Or just one of those weeks?
-unsaved·smart you> my laptop is dying
-vespra> Your laptop is dying, eh. Tell me about that.
-unsaved·smart you> tell me a joke
-vespra> Alright: why do programmers prefer dark mode?
-        Because light attracts bugs.
-```
+A GPT — the same design as the models everyone talks about, just very small:
 
-She saves conversations, remembers them when you reopen them, picks up your name
-from the conversation, swears back if you swear at her, and writes small pieces
-of **Python, JavaScript, HTML or CSS** when you ask. There is no AI model, no API
-key and no internet connection anywhere in it — a few hundred lines of C and
-Python, entirely offline.
+| | Vespra | TinyLlama, for scale |
+| --- | --- | --- |
+| parameters | 1.6 million | 1.1 billion (700× bigger) |
+| layers | 4 | 22 |
+| trained on | 2.5M words of film dialogue | 3 trillion tokens |
+| training | an hour on your CPU | 90 days on 16 A100 GPUs |
+| written in | C, from scratch, no libraries | PyTorch |
 
-## What you need
+Token embeddings, learned positions, causal multi-head self-attention, feed
+forward layers, layer norm, weight tying, backpropagation, AdamW, gradient
+clipping, warmup and cosine decay — the real machinery, all of it in
+`engine/tinylm.c`.
 
-- **Python 3.8 or newer** — to start it
-- **A C compiler** — the chat engine is written in C, and gets compiled for you
-  the first time you run it
+**Be realistic about what a model this size does.** It writes real English
+sentences and picks up the tone of what you say, but it is not going to answer
+questions, remember facts, or hold a long argument — there simply are not enough
+weights in it for that. Train it longer and it gets noticeably better; it will
+never be ChatGPT. What it *is* is a real language model that you trained, and
+that you can read every line of.
 
-Most Macs and Linux machines have both already. If the compiler is missing, the
-runner tells you exactly what to install (see [Troubleshooting](#troubleshooting)).
-
-## How to run it
+## Getting it talking
 
 ```bash
-python3 run.py
+python3 train/prepare.py      # fetch and clean the training data (once, ~40MB)
+python3 run.py --train 30     # train for 30 minutes
+python3 run.py                # chat
 ```
 
-That's it. The first run compiles the engine (about a second), then you are
-chatting. On Windows use `python run.py`.
+The first command is the only time anything is downloaded, and what it downloads
+is **text to learn from**, not a model: the Cornell Movie-Dialogs Corpus, 300,000
+lines of conversation from film scripts. The weights are always yours, trained
+here.
 
-Type `/bye` to leave, or press `Ctrl-D`, or just say "bye".
+Training prints its progress:
+
+```
+model    6000 words, 128 wide, 4 layers, 4 heads, 64 token memory
+weights  1.57M
+corpus   2.46M tokens
+training for 30 minutes -- Ctrl-C stops early and keeps the model
+
+step 4453   loss 3.890  (perplexity 48.9)  15m 26s elapsed, 14m 34s left, 4.4 steps/s
+```
+
+Loss is how surprised the model is by the next word. Guessing at random from a
+6,000 word vocabulary scores 8.7. Under 4.0 it is writing proper sentences.
+Every extra half hour helps, and `/train 30` inside the chat carries on from
+where it left off — nothing is thrown away.
+
+## Requirements
+
+- **Python 3.8+** — for the runner and the data preparation
+- **A C compiler** — `cc`, `gcc` or `clang`; OpenMP is used if it is there
+
+## Chatting
+
+```
+vespra> Hey. What is going on with you today?
+unsaved·smart you> i saw a good film last night
+vespra> We're crazy about you, ma. Don't think about that?
+unsaved·smart you> what did you think of it
+vespra> I'm sorry, sir.
+```
+
+That is honest output from an hour of training. It is grammatical, it is in the
+right register, and it is only loosely connected to what you said — that is what
+1.6M parameters buys you. Train it for an evening and it holds a thread better.
 
 ## Commands
 
@@ -69,40 +101,51 @@ explained.
 
 | Command | What it does |
 | --- | --- |
-| `/help` | the short list of commands |
-| `/HELP` | the long list, with what everything does |
+| `/train [minutes]` | train the model for longer, carrying on from where it is |
+| `/model` | size, training steps, how much text it has read |
 | `/save <chatname>` | save this conversation under a name |
-| `/open <chatname>` | reopen a saved conversation, memory and all |
+| `/open <chatname>` | reopen a saved conversation and feed it back to the model |
 | `/list` | list your saved chats |
-| `/rm <chatname>` | delete one chat — asks `y/n` first |
-| `/rm ALL` | delete every saved chat — asks twice |
+| `/rm <chatname>` \| `/rm ALL` | delete a chat, or all of them — asks first |
 | `/rename <newname>` | rename the chat that is open |
 | `/new [chatname]` | start a fresh conversation |
 | `/name <yourname>` | tell it what to call you |
-| `/mode fast\|smart\|pro` | how hard it thinks (also `/fast`, `/smart`, `/pro`) |
-| `/code <lang> <thing>` | ask for a snippet outright |
-| `/swear on\|off` | whether she swears back (on by default) |
+| `/mode fast\|smart\|pro` | how many answers it draws (also `/fast`, `/smart`, `/pro`) |
+| `/code <lang> <thing>` | ask for a code snippet outright |
+| `/swear on\|off` | filter out the language it learned from film scripts |
 | `/summary` | thinking time, characters typed, average wpm, and more |
-| `/who` | the open chat, your name, the mode, the turn count |
+| `/who` | the open chat, your name, the mode, the model |
 | `/history [n]` | show the last n lines again |
 | `/export [file.txt]` | write the conversation out as plain text |
-| `/clear` | clear the screen and redraw the boot screen |
-| `/rebuild` | recompile the C engine, keeping the conversation |
+| `/clear` | clear the screen |
+| `/rebuild` | recompile the C |
 | `/bye` | save and leave |
 
-`/save_work` works the same as `/save work`, if you prefer typing it that way —
-the same goes for `/open_work` and `/rm_ALL`.
+`/save_work` works the same as `/save work` — the same goes for `/open_work` and
+`/rm_ALL`.
 
-Options: `python3 run.py --open work`, `--mode pro`, `--rebuild`, `--no-color`,
-`--no-delay`, `--cc /path/to/compiler`.
+Options: `python3 run.py --train 30`, `--open work`, `--mode pro`, `--prepare`,
+`--rebuild`, `--no-color`, `--cc /path/to/compiler`.
 
-## Saved chats and memory
+## Modes
+
+The model is the same in all three. What changes is how many answers it samples
+before choosing one, so the wait is real work rather than a pause:
+
+| Mode | What it does |
+| --- | --- |
+| `fast` | one draw, straight back to you |
+| `smart` | draws 3, keeps the one it is most confident in |
+| `pro` | draws 8 and keeps the best — slowest, and it shows |
+
+Confidence is the model's own average log probability for the words it chose, so
+"best" means the answer it was surest of, not the longest.
+
+## Saved chats
+
+Once a chat has a name it saves itself after every line:
 
 ```
-unsaved·smart you> my name is Sam
-vespra> Nice to meet you properly!
-unsaved·smart you> my boss has been unbearable
-vespra> Ah. Good boss or one of the other kind?
 unsaved·smart you> /save work
   saved as work (4 lines) -- it will keep saving itself now
   ──────────────────────────────────────────────
@@ -110,150 +153,22 @@ unsaved·smart you> /save work
   ──────────────────────────────────────────────
 ```
 
-She picks your name up out of the conversation — "my name is Sam" or "call me
-Sam" is enough, no command needed.
+`/open work` loads it and quietly feeds the whole conversation back through the
+model first, so it carries on with what was said in its context window rather
+than starting cold.
 
-Once a chat has a name it saves itself after every single line, so nothing is
-lost if you close the window. Come back later:
-
-```
-work·pro you> /open work
-  opened work
-  ───────────────────────────────────────────
-  chat: work   mode: pro   you: Sam   lines: 4
-  ───────────────────────────────────────────
-
-  you> my boss has been unbearable
-  vespra> Ah. Good boss or one of the other kind?
-
-vespra> Hey, you are back. I still have everything we talked about. Carry on.
-work·pro you> anyway, where were we
-vespra> Sam, ha, alright. Tell me more.
-        Hang on, earlier you mentioned your boss has been unbearable. What is
-        happening there?
-```
-
-It genuinely picks up where it left off. Opening a chat quietly replays every
-earlier line through a fresh engine, so the things you told it about "my ..."
-are back in its memory, its replies carry on rotating from where they were, and
-your name and mode come back with it.
-
-Chats are plain JSON in `chats/`, one file per conversation — yours to read,
-copy, move or delete. They are not committed to git.
-
-## Modes
-
-| Mode | What you get |
-| --- | --- |
-| `fast` | one short sentence, no waiting |
-| `smart` | the full answer, after a moment's thought |
-| `pro` | an answer plus a second thought, after a longer pause |
-
-```
-work·fast you> i am tired of all of this
-vespra> Long day?
-
-work·pro you> i am tired of all of this
-vespra> Sam, or just one of those weeks?
-        Is that a new thing, or has it been brewing a while?
-```
-
-Being straight with you: the modes change **how much she says and how long she
-waits**, not how clever she is underneath. It is the same pattern matcher in all
-three — there is no bigger model to switch to. `pro` composes a longer reply,
-uses your name and brings back things you said earlier; `fast` clips to one
-sentence and answers instantly.
-
-The mode is saved with the chat, and the prompt always shows which one you are
-in.
-
-## Swearing
-
-Swear at her and she gives it back, a bit more each time — amused first, then
-joining in, then properly matching you. Stop, and after a few clean turns she
-settles down again.
-
-```
-unsaved·smart you> this is fucking ridiculous
-vespra> Ha! Alright, strong words. What has got you worked up?
-unsaved·smart you> the whole shitty project is late
-vespra> Ah hell, no wonder you are annoyed.
-unsaved·smart you> fuck this
-vespra> Right, screw them. Tell me the whole bloody story.
-```
-
-She only ever swears after you do, it is ordinary profanity and nothing worse,
-and `/swear off` turns it off entirely — kept per chat, so a work chat can stay
-clean while another does not.
-
-## Settings that stick
-
-Whatever you were last using is what you get next time. Set `/pro`, close the
-window, come back tomorrow — still `/pro`. Same for `/swear off` and your name.
-
-```
-$ python3 run.py           # yesterday you typed /pro
-  chat: unsaved   mode: pro   you: Sam   lines: 0
-```
-
-It lives in `config.json` next to `run.py`: the mode, the swearing setting, your
-name, the last chat you had open and the running totals `/summary` reports.
-Saved chats keep their own copy too, so opening one puts you back in the mode
-that chat was in. Delete `config.json` to start fresh — nothing else depends on
-it. It is not committed to git.
-
-## /summary
-
-Who did the talking, and how long everybody took over it:
-
-```
-  ────────────────────────────────────────────────────────
-  summary
-  this session
-      chatting for       18m 42s
-      you said           37 lines, 1,204 characters, 233 words
-      typing speed       61 wpm (317 characters a minute)
-      she thought for    1m 51s   (mode pro)
-      she said           74 lines, 3,918 characters
-
-  this chat (work)
-      started            2026-08-14 11:34
-      lines              128 in total, 64 from you
-      you have typed     4,301 characters, 812 words
-      typing speed       58 wpm (301 characters a minute)
-      she has thought    6m 12s
-
-  all time
-      saved chats        4
-      you have typed     19,882 characters over 388 lines
-      typing speed       59 wpm (308 characters a minute)
-      she has thought    24m 07s
-      she has typed      61,204 characters back
-      favourite mode     smart (241 of 388 turns)
-  ────────────────────────────────────────────────────────
-```
-
-Thinking time is the real measured pause she made you wait, and words a minute
-is measured from when the prompt appears to when you press enter — so it only
-counts when you are genuinely typing at a terminal, not when input is piped in.
-The three blocks are this run, this conversation across all its sessions, and
-everything you have ever typed at her.
+Chats are plain JSON in `chats/`, one file each. Settings — mode, your name, the
+swearing filter — live in `config.json`, so `/pro` is still `/pro` tomorrow.
 
 ## Asking it for code
 
-Ask in plain English — say what you want and name the language:
+Code requests do **not** go to the model, and that is deliberate: a 1.6M
+parameter network trained on film dialogue cannot write working CSS, and
+pretending otherwise would just waste your time. Those come from a hand-written
+snippet library in `engine/codegen.c`.
 
 ```
-you> make me a button in css
-you> write hello world in py
-you> show me a loop in javascript
-you> give me a form in html
-```
-
-For example:
-
-```
-you> make me a button in css
+unsaved·smart you> make me a button in css
 vespra> Certainly. Here is a little CSS to style a button:
 
 --- css ---
@@ -267,163 +182,96 @@ vespra> Certainly. Here is a little CSS to style a button:
   cursor: pointer;
   transition: background 0.15s ease;
 }
-
-.btn:hover  { background: #2559c4; }
-.btn:active { transform: translateY(1px); }
-.btn:focus-visible { outline: 3px solid #9bc0ff; outline-offset: 2px; }
 --- end ---
 ```
 
-Code prints flush against the left margin, so you can copy it straight into a
-file. If it can't tell what you want, it shows a starting point and lists what
-it knows. You can also be explicit: `/code css dark mode`.
-
-| Language | Things it can write |
-| --- | --- |
-| Python | hello world, input, loops, functions, reverse a string, sort a list, dictionaries, read/write files, random numbers, fizzbuzz, classes, a runnable script |
-| JavaScript | hello world, functions, loops, button click handlers, map/filter/reduce, sorting, timers, `fetch`, classes, reading an input field |
-| HTML | a starter page, buttons, forms, tables, lists, images, links, nav bars, cards |
-| CSS | centring a box, buttons, flexbox, responsive grid, hover effects, cards, dark mode, readable type, media queries, gradients |
-
-Anything that isn't a code request is just conversation.
+Python, JavaScript, HTML and CSS: loops, functions, classes, files, fizzbuzz,
+click handlers, `fetch`, forms, tables, flexbox, grid, dark mode and more.
 
 ## How it works
 
-Two pieces, on purpose:
-
 ```
-   you type            run.py  ──────────►  build/vespra  (the model, in C)
-                       (Python)  >one line
-   you read            run.py  ◄──────────  reply lines + --END--
+   you type          run.py  ─────────►  build/vespra   the chat program
+                     (Python) >one line       │
+                                              ├── engine/tinylm.c  the network
+                                              └── model/vespra.lm  the weights
+   you read          run.py  ◄─────────  reply + --END--
 ```
 
-**`run.py`** is the front door. It finds a C compiler, compiles the engine when
-a source file changes, starts it as a child process, and then handles the boot
-screen, the green, the prompt, the commands and the saved chats.
+Every turn:
 
-**`engine/`** is the bot itself. For each line it:
+1. your line is split into words the same way the training data was, and turned
+   into token numbers;
+2. it is appended to the conversation history, tagged `<user>`;
+3. a `<bot>` marker is added, and the model is asked what comes next;
+4. words are sampled one at a time — temperature, top-k, and a repetition
+   penalty — until it produces a `<user>` or `<end>` marker, or hits the length
+   limit;
+5. in smart and pro mode several answers are drawn and the most confident kept;
+6. the answer is turned back into text and added to the history.
 
-1. normalises the text — lower case, punctuation split into clauses, and
-   contractions expanded (`i'm` → `i am`, `wanna` → `want to`), so the script
-   needs only one spelling;
-2. offers the line to `codegen.c` first, in case you asked for code;
-3. checks whether you swore, and if so answers in kind at the current level;
-4. otherwise finds the highest ranked keyword in the sentence — topics like
-   `pizza` and `boss` beat `my`, which beats the catch-all `i` — and matches
-   that keyword's decomposition patterns, where `*` stands for any run of
-   words;
-5. flips the pronouns in whatever the `*` captured (`my job` → `your job`) and
-   pastes it into a reply template (`Your %2, eh. Tell me about that.`);
-6. if nothing matches, it either brings back something you said earlier about
-   "my ..." or falls back to `Go on, I am listening.`;
-7. shapes the answer for the current mode.
+The model sees the last 64 tokens, so it reads your whole message and the few
+turns before it — there is no keyword matching anywhere in the path.
 
-The script in `engine/script.h` is about a hundred keywords deep — feelings,
-food, music, games, school, work, pets, code, weather, jokes, and the general
-`i`/`you`/`my` rules underneath — and replies rotate through each rule's list
-rather than repeating, which is why saying the same thing twice gets you two
-different answers.
-
-Lines going into the engine are tagged: `>text` is speech, `!command` is a
-setting from the runner (`!mode pro`, `!name Sam`, `!swear off`,
-`!replay <line>`). Replies
-come back as one or more lines ending in a `--END--` sentinel — that sentinel is
-what lets a multi-line code snippet arrive as a single reply. A line with no tag
-counts as speech, so you can run the engine on its own without Python:
-
-```bash
-./build/vespra
-```
+`train/prepare.py` builds the vocabulary and the token stream;
+`engine/train_lm.c` is the training loop; `engine/tinylm.c` is the network
+itself, forward and backward; `engine/vespra.c` is the chat program.
 
 ## Project layout
 
 ```
-run.py            the Python runner: build, boot screen, chat, commands, saving
+run.py             the runner: build, train, chat, commands, saved chats
+train/prepare.py   corpus -> vocabulary + token stream
 engine/
-  vespra.c        the model: normalising, keywords, matching, memory, modes
-  script.h        the personality: keywords, patterns, reply templates
-  codegen.c       the Python/JavaScript/HTML/CSS snippet library
-  codegen.h
-tests/smoke.py    builds it and checks a real conversation, end to end
-chats/            your saved conversations (created when you save one)
-build/            the compiled engine (created for you, not in git)
+  tinylm.h/.c      the transformer: forward, backward, AdamW, sampling
+  train_lm.c       the training loop
+  vespra.c         the chat program
+  codegen.c        the hand-written code snippets
+tests/smoke.py     builds it, trains it, checks the loss falls, then chats
+data/              corpus, vocabulary, token stream   (not in git)
+model/vespra.lm    the trained weights                (not in git, yours)
+chats/             your saved conversations           (not in git)
 ```
 
-## Making it your own
+## Training it on something else
 
-**A new thing to say.** Open `engine/script.h` — that file is the whole
-personality — and add to `KEYWORDS`:
+The model learns from whatever `data/corpus.bin` contains. To use your own text,
+edit `train/prepare.py` — it wants alternating turns, tagged `<user>` and
+`<bot>`, one long stream of token numbers. Your own chat logs, a book, a script:
+anything with enough words in it. Then:
 
-```c
-{ "money", 3, {
-    { "* money *", { "Why does money worry you?",
-                     "Is it really about the money?", NULL } },
-    { NULL, { NULL } } } },
+```bash
+python3 run.py --train 60
 ```
 
-Higher `rank` wins when several keywords appear in one sentence. `*` matches any
-number of words, and `%1`, `%2` … refer to what each `*` captured, in order.
+Bigger model, if you have the patience:
 
-**A new snippet.** Open `engine/codegen.c` and add an entry to `PY`, `JS`,
-`HTML` or `CSS`:
-
-```c
-{ "email validate regex", "check an email address", {
-    "import re",
-    "",
-    "def looks_like_email(text):",
-    "    return re.fullmatch(r\"[^@\\s]+@[^@\\s]+\\.[a-z]{2,}\", text) is not None",
-    NULL } },
+```bash
+./build/train --minutes 120 --dim 192 --layers 6
 ```
 
-The first field is the words that should select it.
-
-**A different name.** The bot's name is the `BOT` constant at the top of
-`run.py`, the greeting in `engine/script.h`, and the letters in `LETTERS` that
-the boot screen is drawn from. Any letter it doesn't have art for is drawn as a
-solid block, so add art for yours if you rename it.
-
-Either way, run `python3 run.py` again — it notices the change and recompiles.
+Delete `model/vespra.lm` first when you change the shape — the old weights will
+not fit the new network.
 
 ## Troubleshooting
 
-**"I could not find a C compiler"**
+**"There is no trained model yet"** — `python3 run.py --train 30`.
 
-| System | Install |
-| --- | --- |
-| macOS | `xcode-select --install` |
-| Debian / Ubuntu | `sudo apt install build-essential` |
-| Fedora | `sudo dnf install gcc` |
-| Arch | `sudo pacman -S gcc` |
-| Windows | [MinGW-w64](https://www.mingw-w64.org/), or run it inside WSL |
+**"No training data"** — `python3 train/prepare.py`.
 
-If your compiler is somewhere unusual: `python3 run.py --cc /path/to/gcc`.
+**It says something odd** — that is a 1.6M parameter model. `/train 60` a few
+times, and try `/pro`.
 
-**Odd characters like `←[1;32m` in the output** — your terminal doesn't do
-colours. Run `python3 run.py --no-color`.
+**No C compiler:** macOS `xcode-select --install`; Debian/Ubuntu
+`sudo apt install build-essential`; Fedora `sudo dnf install gcc`; Windows
+MinGW-w64 or WSL.
 
-**The pauses annoy you** — `python3 run.py --no-delay`, or use `/fast`.
-
-**It stopped noticing a change you made** — `python3 run.py --rebuild`.
-
-**Checking everything still works**
+**Checking everything works**
 
 ```bash
 python3 tests/smoke.py
 ```
 
-Forty checks: it builds the engine, holds a conversation, tells a joke, saves
-the chat, reopens it, confirms the memory survived, swears at her and checks she
-swears back, checks `/swear off` keeps her clean, checks the status bar is never
-stale, and deletes everything again — all inside a temporary folder, so your own
-chats are never touched.
-
-## A note on what this is
-
-Vespra has no idea what you are talking about. Bots like this were written in
-the mid-1960s to show how little it takes to *seem* understanding, and their
-authors were unsettled by how readily people confided in them anyway. This one is
-the same trick with a friendlier script — plus jokes, a box of code snippets,
-somewhere to keep your conversations, and a mouth on her if you start it.
-
-It's a toy, and a nice one to read: start at `respond()` in `engine/vespra.c`.
+It compiles both programs, trains for 36 seconds, checks the loss actually
+falls, then holds a conversation, saves it, reopens it and deletes it again —
+in a temporary folder, so your own model and chats are never touched.

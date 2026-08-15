@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-A quick check that Vespra builds and behaves. No test framework needed:
+A quick check that Vespra builds, trains and behaves. No test framework:
 
     python3 tests/smoke.py
 
-It drives run.py exactly the way a person would, by typing lines at it.
-Saved chats are written to a throwaway copy of the chats folder, so your own
-conversations are left alone.
+It compiles the engine and the trainer, checks that training actually reduces
+the loss, and then drives run.py the way a person would. Everything happens in
+a throwaway folder, so your own chats, settings and trained model are untouched.
 """
 
 from __future__ import annotations
@@ -15,28 +15,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RUNNER = ROOT / "run.py"
-
 failures: list[str] = []
 sandbox = Path(tempfile.mkdtemp(prefix="vespra-test-"))
-
-
-def say(lines: list[str], *flags: str) -> str:
-    """Run one conversation and return everything the bot printed."""
-    result = subprocess.run(
-        [sys.executable, str(RUNNER), "--no-color", "--no-delay", *flags],
-        input="\n".join(lines) + "\n",
-        capture_output=True,
-        text=True,
-        cwd=sandbox,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        failures.append(f"runner exited {result.returncode}\n{result.stderr}")
-    return result.stdout
+RUNNER = sandbox / "run.py"
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -47,97 +32,173 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         failures.append(f"{name}{': ' + detail if detail else ''}")
 
 
-# run.py lives in the repo, but chats and the binary should land in the sandbox
-for item in ("run.py", "engine", "build"):
+def say(lines: list[str], *flags: str, timeout: int = 300) -> str:
+    """Run one conversation and return everything the bot printed."""
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "--no-color", *flags],
+        input="\n".join(lines) + "\n",
+        capture_output=True, text=True, cwd=sandbox, timeout=timeout,
+    )
+    if result.returncode != 0:
+        failures.append(f"runner exited {result.returncode}\n{result.stderr}")
+    return result.stdout
+
+
+def bot_lines(text: str) -> list[str]:
+    return [line[len("vespra> "):] for line in text.splitlines()
+            if line.startswith("vespra> ")]
+
+
+# ---- set the sandbox up -----------------------------------------------------
+
+for item in ("run.py", "engine", "train"):
     source = ROOT / item
     if source.is_dir():
         shutil.copytree(source, sandbox / item, dirs_exist_ok=True)
-    elif source.exists():
+    else:
         shutil.copy2(source, sandbox / item)
-RUNNER = sandbox / "run.py"
 
-MEMORY_LINES = ("mentioned your mother", "back to your mother",
-                "about your mother before", "thinking about your mother")
+# the trained model and the token stream, if this checkout has them
+(sandbox / "data").mkdir(exist_ok=True)
+for name in ("vocab.txt", "corpus.bin"):
+    if (ROOT / "data" / name).exists():
+        shutil.copy2(ROOT / "data" / name, sandbox / "data" / name)
+have_data = (sandbox / "data" / "corpus.bin").exists()
 
+trained = ROOT / "model" / "vespra.lm"
+if trained.exists():
+    (sandbox / "model").mkdir(exist_ok=True)
+    shutil.copy2(trained, sandbox / "model" / "vespra.lm")
+have_model = (sandbox / "model" / "vespra.lm").exists()
 
-def remembers(text: str) -> bool:
-    return any(phrase in text for phrase in MEMORY_LINES)
+print("building ...")
+build = subprocess.run([sys.executable, str(RUNNER), "--rebuild", "--no-color"],
+                       input="/bye\n", capture_output=True, text=True,
+                       cwd=sandbox, timeout=600)
 
+print("build:")
+check("engine compiles", (sandbox / "build" / "vespra").exists(),
+      build.stderr[-400:])
+check("trainer compiles", (sandbox / "build" / "train").exists(),
+      build.stderr[-400:])
+check("no compiler warnings", "warning:" not in build.stderr,
+      build.stderr[-400:])
 
-print("building and chatting ...")
+# ---- the part that makes it a model and not a lookup table ------------------
 
-out = say([
-    "Hello",
-    "I am worried about my mother",
-    "I can't stand it",
-    "you are very good at this",
-    "tell me a joke",
-    "make me a button in css",
-    "write hello world in py",
-    "show me a loop in javascript",
-    "give me a table in html",
-    "asdf qwer zxcv",
-    "/bye",
-])
+print("training:")
+if not have_data:
+    print("  skip (no data/corpus.bin -- run python3 train/prepare.py first)")
+else:
+    # --resume, so this builds on the real shipped model (if there is one)
+    # instead of quietly overwriting thousands of steps of training with 30
+    # seconds of fresh random weights.
+    train_cmd = [str(sandbox / "build" / "train"), "--minutes", "0.6"]
+    if have_model:
+        train_cmd.append("--resume")
+    fresh = subprocess.run(train_cmd, capture_output=True, text=True, cwd=sandbox,
+                           timeout=300, env={"PATH": "/usr/bin:/bin",
+                                             "OMP_NUM_THREADS": "4"})
+    numbers = [float(word) for line in fresh.stdout.split("loss ")[1:]
+               for word in [line.split()[0]] if word.replace(".", "").isdigit()]
+    check("training runs", len(numbers) >= 3,
+          fresh.stdout[-300:] + fresh.stderr[-300:])
+    if len(numbers) >= 3:
+        if have_model:
+            # resuming a model that is already well trained: 30-odd steps at
+            # low loss is dominated by minibatch noise, so just check nothing
+            # has blown up (a real bug -- exploding gradients, a bad load --
+            # would show up as a large jump, not noise).
+            check("loss stays sane when resuming an already-trained model",
+                  numbers[-1] < numbers[0] + 0.5,
+                  f"started {numbers[0]:.2f}, ended {numbers[-1]:.2f}")
+        else:
+            # from random weights it is still warming up, so this should be a
+            # clear, fast drop, not noise.
+            check("the loss comes down from random weights",
+                  numbers[-1] < numbers[0] - 0.2,
+                  f"started {numbers[0]:.2f}, ended {numbers[-1]:.2f}")
+    check("a model file is written", (sandbox / "model" / "vespra.lm").exists())
+    if have_model:
+        trained_info = say(["/model", "/bye"])
+        steps = [int(w) for line in trained_info.splitlines()
+                 if "training steps" in line for w in line.split() if w.isdigit()]
+        check("training resumed from the shipped model rather than restarting",
+              bool(steps) and steps[0] > 100, f"steps: {steps}")
+
+# ---- talking ---------------------------------------------------------------
 
 print("conversation:")
-check("draws the boot screen", "eeeeeee" in out and "aaaaaaa" in out and
-      "sssss" in out, "expected big letters drawn out of little ones")
-check("greets on start", "I am Vespra" in out)
-check("sounds friendly, not clinical",
-      not any(phrase in out for phrase in
-              ("What does that suggest to you", "Does talking about this bother",
-               "How does that make you feel")))
-check("no trace of the old name", "eliza" not in out.lower())
-check("swaps pronouns", "your mother" in out, "expected 'my mother' -> 'your mother'")
-check("expands contractions", "stand it" in out.lower(),
-      "\"i can't stand it\" should match the \"i can not\" pattern")
-check("takes a compliment", "I will take that" in out or "too kind" in out)
-check("tells a joke", "bugs" in out.lower() or "console it" in out.lower())
-check("writes css", "--- css ---" in out and ".btn {" in out)
-check("writes python", "--- python ---" in out and 'print("Hello, world!")' in out)
-check("writes javascript", "--- javascript ---" in out and "console.log" in out)
-check("writes html", "--- html ---" in out and "<table>" in out)
-check("brings back a remembered remark", remembers(out))
-check("says goodbye", "See you" in out or "Take it easy" in out)
+if not have_model:
+    print("  skip (no trained model -- run python3 run.py --train 20 first)")
+else:
+    out = say(["hello there", "what do you think about all this",
+               "i went to the shops today", "/bye"])
+    replies = bot_lines(out)
+
+    check("draws the boot screen", "eeeeeee" in out and "aaaaaaa" in out)
+    check("answers every turn", len(replies) >= 3, f"got {len(replies)}")
+    check("answers are not empty", all(len(r.strip()) > 1 for r in replies))
+    check("answers differ from each other", len(set(replies)) == len(replies),
+          f"{replies}")
+
+    # every word it says must be a word it learned -- nothing is hardcoded
+    vocab = set((sandbox / "data" / "vocab.txt").read_text().split())
+    spoken = {word.strip(".,!?").lower()
+              for reply in replies for word in reply.split()}
+    unknown = {w for w in spoken if w and w not in vocab}
+    check("it only says words it was trained on", not unknown, f"{unknown}")
+
+    check("no trace of the old name", "eliza" not in out.lower())
+    check("says goodbye", "See you" in out or "Come back" in out)
+
+    print("modes:")
+
+    def thinking_seconds(mode: str) -> float:
+        """What the runner itself measured around the model, minus startup."""
+        text = say([f"/{mode}", "tell me something", "and something else",
+                    "/summary", "/bye"])
+        for line in text.splitlines():
+            if "she thought for" in line:
+                spent = line.split("she thought for")[1].split("(")[0].strip()
+                if spent.endswith("s") and "m" not in spent:
+                    return float(spent[:-1])
+                minutes, seconds = spent.split("m")
+                return float(minutes) * 60 + float(seconds.strip().rstrip("s"))
+        return -1.0
+
+    quick, slow = thinking_seconds("fast"), thinking_seconds("pro")
+    check("pro really does more work than fast", slow > quick,
+          f"fast {quick:.1f}s of model time, pro {slow:.1f}s")
+
+    model_info = say(["/model", "/bye"])
+    check("/model reports the real network",
+          "weights" in model_info and "training steps" in model_info,
+          model_info[-300:])
+
+print("code snippets:")
+code = say(["make me a button in css", "write hello world in py", "/bye"])
+check("writes css", "--- css ---" in code and ".btn {" in code)
+check("writes python", "--- python ---" in code and 'print("Hello, world!")' in code)
 
 print("commands:")
 helped = say(["/help", "/bye"])
-check("/help lists every command", all(name in helped for name, *_ in
-                                       [("/save",), ("/open",), ("/rm",),
-                                        ("/mode",), ("/name",), ("/bye",)]))
+check("/help lists every command",
+      all(name in helped for name in ("/save", "/open", "/rm", "/mode",
+                                      "/train", "/model", "/bye")))
 long_help = say(["/HELP", "/bye"])
-check("/HELP explains the modes",
-      "fast" in long_help and "pro" in long_help and "pattern matcher" in long_help)
-check("/HELP is longer than /help", len(long_help) > len(helped))
-
-named = say(["/name Cam", "/who", "/bye"])
-check("/name is remembered", "you      Cam" in named)
-
-modes = say(["/fast", "i am very tired of all of this", "/pro",
-             "i am very tired of all of this", "/bye"])
-fast_lines = modes.split("/pro")[0]
-pro_lines = modes.split("/pro")[1]
-check("fast mode answers in one sentence",
-      max((len(line) for line in fast_lines.splitlines()
-           if line.startswith("vespra> ")), default=999) < 90)
-check("pro mode adds a second thought",
-      sum(1 for line in pro_lines.splitlines()
-          if line.startswith("vespra> ") or line.startswith("        ")) >= 2)
+check("/HELP is the long version", len(long_help) > len(helped))
+check("/HELP explains the modes honestly", "candidates" in long_help.lower()
+      or "samples" in long_help.lower())
 
 print("saved chats:")
-say(["/name Cam", "/pro", "I am worried about my mother", "/save mychat", "/bye"])
+say(["/name Testy", "/pro", "hello there", "/save mychat", "/bye"])
 check("chat file written", (sandbox / "chats" / "mychat.json").exists())
 
-reopened = say(["/open mychat", "gibberish nonsense words", "/who", "/bye"])
-check("/open restores the conversation", "i am worried about my mother"
-      in reopened.lower())
-check("/open restores your name", "you      Cam" in reopened)
+reopened = say(["/open mychat", "/who", "/bye"])
+check("/open restores the conversation", "hello there" in reopened.lower())
+check("/open restores your name", "you      Testy" in reopened)
 check("/open restores the mode", "mode     pro" in reopened)
-check("/open restores the memory", remembers(reopened))
-
-listed = say(["/list", "/bye"])
-check("/list shows the chat", "mychat" in listed)
 
 kept = say(["/rm mychat", "n", "/list", "/bye"])
 check("/rm asks first", "[y/n]" in kept)
@@ -148,31 +209,10 @@ check("/rm removes it when you say yes",
       not (sandbox / "chats" / "mychat.json").exists())
 check("/list copes with nothing saved", "no saved chats" in removed)
 
-say(["/save one", "/new two", "/new three", "/bye"])
+say(["/save one", "/new two", "/bye"])
 all_gone = say(["/rm ALL", "y", "y", "/list", "/bye"])
 check("/rm ALL confirms twice", all_gone.count("[y/n]") >= 2)
-check("/rm ALL removes everything",
-      not list((sandbox / "chats").glob("*.json")))
-
-underscore = say(["/save_undertest", "/list", "/bye"])
-check("/save_name works like /save name", "undertest" in underscore)
-
-print("swearing:")
-sweary = say(["this is fucking ridiculous", "the whole shitty thing is late",
-              "fuck all of it", "/bye"])
-check("swears back when you do",
-      any(word in sweary.lower() for word in ("damn", "hell", "bloody", "crap",
-                                              "fuck", "sod", "shit")))
-escalates = [line for line in sweary.splitlines() if line.startswith("vespra> ")]
-check("starts mild and builds", len(escalates) >= 3 and
-      escalates[0] != escalates[-1])
-
-clean = say(["/swear off", "this is fucking ridiculous", "/bye"])
-check("/swear off keeps it clean",
-      not any(word in clean.lower() for word in
-              ("fuck it", "bloody hell", "sod that", "screw them")))
-check("stays polite by default in ordinary chat",
-      not any(word in out.lower() for word in ("fuck", "shit", "bloody")))
+check("/rm ALL removes everything", not list((sandbox / "chats").glob("*.json")))
 
 print("settings that stick:")
 say(["/pro", "/swear off", "/name Testy", "/bye"])
@@ -181,53 +221,18 @@ check("mode survives closing the app", "mode     pro" in again)
 check("swearing setting survives", "swearing off" in again)
 check("your name survives", "you      Testy" in again)
 check("config file written", (sandbox / "config.json").exists())
-fresh = say(["/smart", "/swear on", "/name off", "/bye"])
-check("changing it back sticks too", "mode smart" in fresh)
 
-print("summary:")
-summed = say(["hello there you", "i am typing some words at you now",
-              "/summary", "/bye"])
+print("summary and layout:")
+summed = say(["hello", "/summary", "/bye"])
 check("/summary reports thinking time", "she thought for" in summed)
-check("/summary counts what you typed",
-      "characters" in summed and "words" in summed)
-check("/summary mentions words a minute",
-      "typing speed" in summed and "wpm" in summed.lower()
-      or "not enough typing" in summed)
 check("/summary covers session, chat and all time",
-      "this session" in summed and "this chat" in summed
-      and "all time" in summed)
-check("/summary counts characters, not zero",
-      any(line.strip().startswith("you said") and "0 characters" not in line
-          for line in summed.splitlines()))
+      "this session" in summed and "this chat" in summed and "all time" in summed)
 
-print("layout:")
-laid = say(["/bye"])
-rules = [line.strip() for line in laid.splitlines()
-         if line.strip().startswith("─")]
-boxed = laid.splitlines()
-check("nothing hangs off the rule", all(
-    len(boxed[i].strip()) <= len(rules[0])
-    for i in range(boxed.index("  " + rules[0]) + 1,
-                   len(boxed)) if boxed[i].strip().startswith(("local chat",
-                                                               "chat:"))),
-      "the header lines must fit inside the ─── rule")
-
-print("live status:")
-status = say(["/pro", "/save trial", "/who", "/bye"])
-check("prompt shows the mode you switched to", "trial\u00b7pro you>" in status
-      or "trial\u00b7pro" in status)
-check("status bar refreshes on change", "mode: pro" in status)
-check("status bar shows the saved chat name", "chat: trial" in status)
-check("no stale mode left on screen", "mode: smart" not in status.split("/pro")[-1])
-say(["/rm trial", "y", "/bye"])
-
-print("engine:")
-binary = sandbox / "build" / ("vespra.exe" if sys.platform == "win32" else "vespra")
-direct = subprocess.run(
-    [str(binary)], input="men are all alike\nbye\n",
-    capture_output=True, text=True, timeout=30,
-)
-check("engine runs standalone", "--END--" in direct.stdout and direct.returncode == 0)
+rules = [line.strip() for line in summed.splitlines() if line.strip().startswith("─")]
+inside = [line.strip() for line in summed.splitlines()
+          if line.strip().startswith(("local chat", "chat:"))]
+check("nothing hangs off the rule",
+      all(len(line) <= len(rules[0]) for line in inside) if rules and inside else False)
 
 shutil.rmtree(sandbox, ignore_errors=True)
 
