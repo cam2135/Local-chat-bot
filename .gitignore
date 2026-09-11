@@ -1,12 +1,18 @@
 # compiled engine
 build/
 
-# your conversations and settings
+# your conversations, settings and exported transcripts
 chats/
 config.json
 *.txt
+!data/vocab.txt
 
 __pycache__/
 *.pyc
-model/
-data/
+
+# training-only data: rebuilt automatically by train/prepare.py when you
+# ask to train further. The base model ships without needing these.
+data/corpus.bin
+data/corpus.txt
+data/movie_lines.txt
+data/movie_conversations.txt

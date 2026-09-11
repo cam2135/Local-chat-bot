@@ -1,11 +1,15 @@
 # Vespra
 
-A small language model you train yourself, and then chat with in your terminal.
+A small language model that ships trained and ready to talk — clone it, run it,
+chat. No setup step, same as opening ChatGPT.
 
-Not a wrapper around somebody else's model — there is no Ollama here, nothing is
-downloaded from Hugging Face, no API key, no network at chat time. The neural
-network is about 1,300 lines of C in `engine/`, it starts from random numbers,
-and it learns to talk by reading 250,000 real conversations on your own machine.
+Unlike ChatGPT, though, nothing is a wrapper around somebody else's model: there
+is no Ollama here, nothing downloaded from Hugging Face, no API key, no network
+at chat time. The neural network is about 1,300 lines of C in `engine/`, it
+started from random numbers, and it learned to talk by reading 250,000 real
+conversations — trained right here, with the resulting weights shipped in this
+repo (`model/vespra.lm`) as the base model. You can chat with that immediately,
+or run `/train` to keep teaching it and make it your own.
 
 ```
   v     v  eeeeeee   sssss   pppppp   rrrrrr     aaa
@@ -49,15 +53,35 @@ that you can read every line of.
 ## Getting it talking
 
 ```bash
-python3 train/prepare.py      # fetch and clean the training data (once, ~40MB)
-python3 run.py --train 30     # train for 30 minutes
-python3 run.py                # chat
+python3 run.py
 ```
 
-The first command is the only time anything is downloaded, and what it downloads
-is **text to learn from**, not a model: the Cornell Movie-Dialogs Corpus, 300,000
-lines of conversation from film scripts. The weights are always yours, trained
-here.
+That's it — it builds the C program and starts chatting with the base model
+that ships in the repo. Nothing is downloaded, nothing is trained; that
+already happened once, here, so you don't have to wait for it.
+
+## Training it further
+
+The base model is deliberately modest (see [below](#what-it-actually-is)), and
+the whole point of doing your own training is that you can push past it:
+
+```bash
+python3 run.py --train 30     # train for 30 more minutes, then chat
+```
+
+or from inside the chat:
+
+```
+you> /train 30
+```
+
+The first time you train, it also fetches the training text — the Cornell
+Movie-Dialogs Corpus, 300,000 lines of conversation from film scripts (about
+40MB, downloaded once and cached in `data/`). That's the only thing that gets
+downloaded; the model itself is never replaced with someone else's weights,
+only further trained on top of what already shipped. `/train` picks up from
+wherever the model currently is — your own training time is never wasted, and
+neither is the hour that already went into the base model.
 
 Training prints its progress:
 
@@ -85,14 +109,16 @@ where it left off — nothing is thrown away.
 ```
 vespra> Hey. What is going on with you today?
 unsaved·smart you> i saw a good film last night
-vespra> We're crazy about you, ma. Don't think about that?
+vespra> Well, uh, I think that's where the guy came from before morning. I said we knew.
 unsaved·smart you> what did you think of it
-vespra> I'm sorry, sir.
+vespra> Yeah, it's so nice to talk about it.
 ```
 
-That is honest output from an hour of training. It is grammatical, it is in the
-right register, and it is only loosely connected to what you said — that is what
-1.6M parameters buys you. Train it for an evening and it holds a thread better.
+That is honest, unedited output from the base model that ships in this repo. It
+is grammatical, it is in the right register, and it is only loosely connected to
+what you said — that is what 1.6M parameters buys you. `/train` some more and it
+holds a thread better; it will still never be ChatGPT, and the README says so on
+purpose rather than oversell it.
 
 ## Commands
 
@@ -228,8 +254,10 @@ engine/
   vespra.c         the chat program
   codegen.c        the hand-written code snippets
 tests/smoke.py     builds it, trains it, checks the loss falls, then chats
-data/              corpus, vocabulary, token stream   (not in git)
-model/vespra.lm    the trained weights                (not in git, yours)
+model/vespra.lm    the trained weights -- the base model, shipped in git
+data/vocab.txt     its vocabulary -- shipped in git, needed to talk at all
+data/*             everything else here (the corpus) is rebuilt on demand,
+                   not shipped -- see train/prepare.py
 chats/             your saved conversations           (not in git)
 ```
 
@@ -255,9 +283,12 @@ not fit the new network.
 
 ## Troubleshooting
 
-**"There is no trained model yet"** — `python3 run.py --train 30`.
+**"There is no trained model yet"** — the base model ships in the repo, so
+this should only happen if `model/vespra.lm` got deleted. `python3 run.py
+--train 30` rebuilds one.
 
-**"No training data"** — `python3 train/prepare.py`.
+**"No training data"** — only shows up if you `/train` and the corpus was
+never fetched (or was cleared out). `python3 train/prepare.py` fetches it.
 
 **It says something odd** — that is a 1.6M parameter model. `/train 60` a few
 times, and try `/pro`.

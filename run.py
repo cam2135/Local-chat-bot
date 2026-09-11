@@ -1229,10 +1229,12 @@ def main() -> int:
     session.remember_settings()
 
     if not MODEL.exists():
+        # The base model ships in the repo, so this only happens if
+        # model/vespra.lm went missing -- not the normal first run.
         print()
-        print(f"  {screen.dim}There is no trained model yet -- I have nothing "
-              f"to think with.{screen.off}")
-        print(f"  {screen.dim}Train one now with:  "
+        print(f"  {screen.dim}The base model is missing -- nothing to think "
+              f"with.{screen.off}")
+        print(f"  {screen.dim}Rebuild one with:  "
               f"{screen.off}{screen.bright}python3 run.py --train 30{screen.off}")
         print(f"  {screen.dim}Twenty minutes gets you something that talks; "
               f"an hour or two is better.{screen.off}")
