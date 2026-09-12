@@ -6,8 +6,9 @@ chat. No setup step, same as opening ChatGPT.
 Unlike ChatGPT, though, nothing is a wrapper around somebody else's model: there
 is no Ollama here, nothing downloaded from Hugging Face, no API key, no network
 at chat time. The neural network is about 1,300 lines of C in `engine/`, it
-started from random numbers, and it learned to talk by reading 250,000 real
-conversations — trained right here, with the resulting weights shipped in this
+started from random numbers, and it learned to talk from 37,000 instruction ->
+response pairs — the kind written to teach a helpful assistant, not transcribed
+from a script — trained right here, with the resulting weights shipped in this
 repo (`model/vespra.lm`) as the base model. You can chat with that immediately,
 or run `/train` to keep teaching it and make it your own.
 
@@ -32,10 +33,10 @@ A GPT — the same design as the models everyone talks about, just very small:
 
 | | Vespra | TinyLlama, for scale |
 | --- | --- | --- |
-| parameters | 1.6 million | 1.1 billion (700× bigger) |
-| layers | 4 | 22 |
-| trained on | 2.5M words of film dialogue | 3 trillion tokens |
-| training | an hour on your CPU | 90 days on 16 A100 GPUs |
+| parameters | 4.2 million | 1.1 billion (260× bigger) |
+| layers | 6 | 22 |
+| trained on | 37k instruction/response pairs, 1.7M tokens | 3 trillion tokens |
+| training | a few hours on your CPU | 90 days on 16 A100 GPUs |
 | written in | C, from scratch, no libraries | PyTorch |
 
 Token embeddings, learned positions, causal multi-head self-attention, feed
@@ -75,27 +76,30 @@ or from inside the chat:
 you> /train 30
 ```
 
-The first time you train, it also fetches the training text — the Cornell
-Movie-Dialogs Corpus, 300,000 lines of conversation from film scripts (about
-40MB, downloaded once and cached in `data/`). That's the only thing that gets
-downloaded; the model itself is never replaced with someone else's weights,
-only further trained on top of what already shipped. `/train` picks up from
-wherever the model currently is — your own training time is never wasted, and
-neither is the hour that already went into the base model.
+The first time you train, it also fetches the training text — the [Stanford
+Alpaca dataset](https://github.com/tatsu-lab/stanford_alpaca), 52,000
+instruction/response pairs (about 22MB, downloaded once and cached in `data/`,
+then filtered down to the ~37k that are clean prose a word-level model can
+learn from — see `train/prepare.py` for exactly what gets dropped and why).
+That's the only thing that gets downloaded; the model itself is never replaced
+with someone else's weights, only further trained on top of what already
+shipped. `/train` picks up from wherever the model currently is — your own
+training time is never wasted, and neither is the time that already went into
+the base model.
 
 Training prints its progress:
 
 ```
-model    6000 words, 128 wide, 4 layers, 4 heads, 64 token memory
-weights  1.57M
-corpus   2.46M tokens
+model    8000 words, 192 wide, 6 layers, 6 heads, 96 token memory
+weights  4.22M
+corpus   1.67M tokens
 training for 30 minutes -- Ctrl-C stops early and keeps the model
 
 step 4453   loss 3.890  (perplexity 48.9)  15m 26s elapsed, 14m 34s left, 4.4 steps/s
 ```
 
-Loss is how surprised the model is by the next word. Guessing at random from a
-6,000 word vocabulary scores 8.7. Under 4.0 it is writing proper sentences.
+Loss is how surprised the model is by the next word. Guessing at random from an
+8,000 word vocabulary scores about 9.0. Under 4.0 it is writing proper sentences.
 Every extra half hour helps, and `/train 30` inside the chat carries on from
 where it left off — nothing is thrown away.
 
@@ -138,7 +142,7 @@ explained.
 | `/name <yourname>` | tell it what to call you |
 | `/mode fast\|smart\|pro` | how many answers it draws (also `/fast`, `/smart`, `/pro`) |
 | `/code <lang> <thing>` | ask for a code snippet outright |
-| `/swear on\|off` | filter out the language it learned from film scripts |
+| `/swear on\|off` | filter out any swearing (rare — the training data has almost none) |
 | `/summary` | thinking time, characters typed, average wpm, and more |
 | `/who` | the open chat, your name, the mode, the model |
 | `/history [n]` | show the last n lines again |
@@ -188,9 +192,10 @@ swearing filter — live in `config.json`, so `/pro` is still `/pro` tomorrow.
 
 ## Asking it for code
 
-Code requests do **not** go to the model, and that is deliberate: a 1.6M
-parameter network trained on film dialogue cannot write working CSS, and
-pretending otherwise would just waste your time. Those come from a hand-written
+Code requests do **not** go to the model, and that is deliberate: a model this
+size cannot write working CSS reliably, and pretending otherwise would just
+waste your time (the training data was filtered to drop code and markup for
+exactly this reason — see `train/prepare.py`). Those come from a hand-written
 snippet library in `engine/codegen.c`.
 
 ```
@@ -236,7 +241,7 @@ Every turn:
 5. in smart and pro mode several answers are drawn and the most confident kept;
 6. the answer is turned back into text and added to the history.
 
-The model sees the last 64 tokens, so it reads your whole message and the few
+The model sees the last 96 tokens, so it reads your whole message and the few
 turns before it — there is no keyword matching anywhere in the path.
 
 `train/prepare.py` builds the vocabulary and the token stream;
@@ -263,23 +268,28 @@ chats/             your saved conversations           (not in git)
 
 ## Training it on something else
 
-The model learns from whatever `data/corpus.bin` contains. To use your own text,
-edit `train/prepare.py` — it wants alternating turns, tagged `<user>` and
-`<bot>`, one long stream of token numbers. Your own chat logs, a book, a script:
-anything with enough words in it. Then:
+The model learns from whatever `data/corpus.bin` contains. `train/prepare.py`
+currently builds that from the Alpaca instruction dataset — each example
+becomes `<user> instruction (+ input) <bot> response <end>` — but the format is
+just tagged turns as a stream of token numbers, so any Q&A pairs, chat logs, or
+even a plain book (as running `<user>`/`<bot>` turns) will work. Point the
+`SOURCE_URL` at your own JSON, or write your own loader, keeping the same
+`<user>`/`<bot>`/`<end>` tagging and token output. Then:
 
 ```bash
 python3 run.py --train 60
 ```
 
-Bigger model, if you have the patience:
+Bigger model, if you have the patience — matching the shipped one is
+`--dim 192 --layers 6 --heads 6 --context 96`, so go up from there:
 
 ```bash
-./build/train --minutes 120 --dim 192 --layers 6
+./build/train --minutes 120 --dim 256 --layers 8 --heads 8 --context 128
 ```
 
-Delete `model/vespra.lm` first when you change the shape — the old weights will
-not fit the new network.
+Delete `model/vespra.lm` first when you change the shape (dim, layers, heads or
+context) or swap the training data — the old weights and vocabulary will not
+match the new one, and training won't warn you, it'll just load the wrong shape.
 
 ## Troubleshooting
 
@@ -290,8 +300,8 @@ this should only happen if `model/vespra.lm` got deleted. `python3 run.py
 **"No training data"** — only shows up if you `/train` and the corpus was
 never fetched (or was cleared out). `python3 train/prepare.py` fetches it.
 
-**It says something odd** — that is a 1.6M parameter model. `/train 60` a few
-times, and try `/pro`.
+**It says something odd** — that is a model with a few million parameters, not
+a few hundred billion. `/train 60` a few times, and try `/pro`.
 
 **No C compiler:** macOS `xcode-select --install`; Debian/Ubuntu
 `sudo apt install build-essential`; Fedora `sudo dnf install gcc`; Windows

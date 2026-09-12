@@ -97,7 +97,7 @@ int main(int argc, char **argv)
 {
     double minutes = 20.0;
     int resume = 0;
-    int dim = 128, layers = 4, heads = 4, context = 64, batch = 16;
+    int dim = 192, layers = 6, heads = 6, context = 96, batch = 16;
     float lr = 6e-4f, weight_decay = 0.05f;
     int warmup = 100;
 
@@ -119,6 +119,10 @@ int main(int argc, char **argv)
             dim = atoi(argv[++i]);
         else if (strcmp(argv[i], "--layers") == 0 && i + 1 < argc)
             layers = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--heads") == 0 && i + 1 < argc)
+            heads = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--context") == 0 && i + 1 < argc)
+            context = atoi(argv[++i]);
         else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc)
             batch = atoi(argv[++i]);
         else if (strcmp(argv[i], "--lr") == 0 && i + 1 < argc)

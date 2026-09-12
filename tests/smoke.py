@@ -91,9 +91,12 @@ if not have_data:
     print("  skip (no data/corpus.bin -- run python3 train/prepare.py first)")
 else:
     # --resume, so this builds on the real shipped model (if there is one)
-    # instead of quietly overwriting thousands of steps of training with 30
-    # seconds of fresh random weights.
-    train_cmd = [str(sandbox / "build" / "train"), "--minutes", "0.6"]
+    # instead of quietly overwriting thousands of steps of training with a
+    # few seconds of fresh random weights. 1.5 minutes rather than a shorter
+    # window: the shipped model is big enough now (a few million parameters)
+    # that a too-short run can land right at the "at least 3 readings"
+    # boundary below and flake depending on how fast the machine is.
+    train_cmd = [str(sandbox / "build" / "train"), "--minutes", "1.5"]
     if have_model:
         train_cmd.append("--resume")
     fresh = subprocess.run(train_cmd, capture_output=True, text=True, cwd=sandbox,

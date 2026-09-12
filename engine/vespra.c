@@ -7,12 +7,13 @@
  * word at a time from what the model predicts should come next.
  *
  * So the model reads everything you wrote -- not a keyword out of it -- and it
- * answers with words it learned from 250,000 real conversations, not from a
- * list somebody typed in.
+ * answers with words it learned from 37,000 instruction/response pairs, not
+ * from a list somebody typed in.
  *
  * The one thing still done by hand is the code snippets (codegen.c): when you
- * ask for a button in CSS you want working CSS, and a 1.6M parameter model
- * trained on film dialogue is not going to give you that.
+ * ask for a button in CSS you want working CSS, and a model this size is not
+ * going to give you that reliably (code examples were filtered out of the
+ * training data for exactly this reason -- see train/prepare.py).
  *
  * Lines in:
  *   >text     something the person said
@@ -32,7 +33,7 @@
 #define MAX_REPLY  16384
 #define MAX_VOCAB  65536
 #define HISTORY    512      /* tokens of conversation kept for context */
-#define MAX_NEW    32
+#define MAX_NEW    56
 
 #define END_NORMAL "--END--"
 #define END_QUIT   "--END--QUIT--"
@@ -53,7 +54,12 @@ static char user_name[64];
 static int swearing_on = 1;
 static unsigned seed = 1u;
 
-/* Only used to keep the mouth shut when /swear off is set. */
+/*
+ * Used to keep the mouth shut when /swear off is set. The instruction data
+ * this model learns from has almost none of this in it, so in practice there
+ * is rarely anything here to filter -- the list stays as a safety net in case
+ * a candidate reply ever does contain one of these.
+ */
 static const char *SWEARS[] = {
     "fuck", "fucking", "fucked", "fucker", "shit", "shitty", "bullshit",
     "bitch", "bastard", "asshole", "damn", "goddamn", "crap", "piss",
@@ -242,7 +248,7 @@ static int has_swear(const char *text)
 static void answer(char *out, size_t outsz)
 {
     int candidates = (mode == MODE_FAST) ? 1 : (mode == MODE_SMART) ? 3 : 8;
-    int max_new = (mode == MODE_FAST) ? 14 : (mode == MODE_SMART) ? 22 : MAX_NEW;
+    int max_new = (mode == MODE_FAST) ? 18 : (mode == MODE_SMART) ? 34 : MAX_NEW;
     float temperature = (mode == MODE_FAST) ? 0.75f : 0.95f;
     int top_k = (mode == MODE_FAST) ? 30 : 60;
     unsigned short stops[3] = { TOK_USER, TOK_END, TOK_BOT };

@@ -14,5 +14,4 @@ __pycache__/
 # ask to train further. The base model ships without needing these.
 data/corpus.bin
 data/corpus.txt
-data/movie_lines.txt
-data/movie_conversations.txt
+data/alpaca_data.json

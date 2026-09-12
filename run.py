@@ -92,9 +92,11 @@ COMMANDS = [
     ("/code", "<lang> <thing>", "ask for a code snippet outright",
      "For example /code css dark mode. Python, JavaScript, HTML and CSS.\n"
      "  You can also just say \"make me a button in css\" in normal conversation."),
-    ("/swear", "on|off", "let her use the language she learned",
-     "She learned to talk from film dialogue, so she swears sometimes. /swear off\n"
-     "  filters it out: any reply with swearing in it is thrown away and resampled."),
+    ("/swear", "on|off", "filter out any swearing in her replies",
+     "The training data is near-spotless (an instruction/response dataset, not\n"
+     "  casual dialogue), so there is rarely anything to catch -- this is a safety\n"
+     "  net, not a personality trait. Any reply that does contain swearing is\n"
+     "  thrown away and resampled when this is off."),
     ("/summary", "", "who did the talking, and how long it took",
      "How long she has spent thinking, how much you have typed, your average\n"
      "  words a minute, and the same again for this chat and for all time."),
@@ -900,17 +902,17 @@ class Session:
 
     def cmd_swear(self, arg: str) -> None:
         if not arg:
-            self.note("swearing is "
-                      + ("on -- give it to me and I will give it back"
-                         if self.chat.swearing else "off -- I will stay clean"))
+            self.note("swear filter is "
+                      + ("off -- nothing gets caught (she rarely swears anyway)"
+                         if self.chat.swearing else "on -- any swearing gets filtered out"))
             return
 
         self.chat.swearing = arg.lower() not in ("off", "no", "false", "0")
         self.push_state()
         self.chat.save()
         self.remember_settings()
-        self.note("alright, I will swear back" if self.chat.swearing
-                  else "fine, keeping it clean from here")
+        self.note("filter off -- nothing gets caught" if self.chat.swearing
+                  else "filter on -- keeping it clean from here")
 
     def cmd_summary(self) -> None:
         """Who did how much of the talking, and how long everybody took."""
