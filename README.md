@@ -95,13 +95,17 @@ weights  4.22M
 corpus   1.67M tokens
 training for 30 minutes -- Ctrl-C stops early and keeps the model
 
-step 4453   loss 3.890  (perplexity 48.9)  15m 26s elapsed, 14m 34s left, 4.4 steps/s
+step 4453   loss 3.890  (perplexity 48.9)  1h 46m elapsed, 45m left, 0.7 steps/s
 ```
 
 Loss is how surprised the model is by the next word. Guessing at random from an
-8,000 word vocabulary scores about 9.0. Under 4.0 it is writing proper sentences.
-Every extra half hour helps, and `/train 30` inside the chat carries on from
-where it left off — nothing is thrown away.
+8,000 word vocabulary scores about 9.0. The base model shipped here trained down
+to about 3.3 (see [Chatting](#chatting) below for exactly what that sounds
+like) — grammatically shaky, sometimes topically right, not remotely reliable.
+There isn't a clean threshold where it suddenly becomes trustworthy; more
+training moves it in the right direction gradually, it doesn't unlock fluency.
+`/train 30` inside the chat carries on from where it left off — nothing is
+thrown away, ever, no matter how many times you come back to it.
 
 ## Requirements
 
@@ -111,18 +115,22 @@ where it left off — nothing is thrown away.
 ## Chatting
 
 ```
-vespra> Hey. What is going on with you today?
-unsaved·smart you> i saw a good film last night
-vespra> Well, uh, I think that's where the guy came from before morning. I said we knew.
-unsaved·smart you> what did you think of it
-vespra> Yeah, it's so nice to talk about it.
+vespra> Hello there!
+unsaved·smart you> what are the three primary colors
+vespra> The two primary colors that make the color are blue, and blue.
+unsaved·smart you> give me three tips for staying healthy
+vespra> 1. Exercise regularly so you can help you stay throughout your daily life. 2. Eat a variety of foods that get some of some to do life like camping, or
 ```
 
-That is honest, unedited output from the base model that ships in this repo. It
-is grammatical, it is in the right register, and it is only loosely connected to
-what you said — that is what 1.6M parameters buys you. `/train` some more and it
-holds a thread better; it will still never be ChatGPT, and the README says so on
-purpose rather than oversell it.
+That is honest, unedited output from the base model that ships in this repo —
+not a best-of-several attempts. Be clear-eyed about what it shows: it has
+picked up the *shape* of a helpful assistant answering a question (a factual
+claim, a numbered list) far more than the old movie-dialogue model ever did,
+but it gets the actual facts wrong and the grammar breaks down partway through
+longer answers. **Do not trust anything it tells you.** `/train` some more and
+it holds together a bit longer; more parameters and more data would matter far
+more than more training time on this exact model, and it will never be
+ChatGPT. The README says so on purpose rather than oversell it.
 
 ## Commands
 
