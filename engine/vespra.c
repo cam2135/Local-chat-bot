@@ -113,20 +113,29 @@ static int word_id(const char *word)
     return TOK_UNK;
 }
 
-/* Same splitting rule train/prepare.py used, or the model sees nonsense. */
+/*
+ * Same splitting rule train/prepare.py used ([a-z']+|[0-9]+|[.,!?;:]), or the
+ * model sees nonsense: letters and digits are separate token classes there
+ * (so "abc123" is two tokens, "abc" then "123"), and ';'/':' count as
+ * punctuation same as '.', ',', '!', '?'.
+ */
+enum CharClass { CLASS_NONE, CLASS_LETTERS, CLASS_DIGITS };
+
 static int tokenize(const char *text, unsigned short *out, int max)
 {
+    enum CharClass run = CLASS_NONE;
     char word[64];
     int count = 0;
     size_t at = 0;
 
     for (size_t i = 0;; i++) {
-        char c = text[i];
-        int letter = (isalpha((unsigned char)c) || c == '\'');
+        unsigned char c = (unsigned char)text[i];
+        enum CharClass kind = (isalpha(c) || c == '\'') ? CLASS_LETTERS
+                             : isdigit(c) ? CLASS_DIGITS : CLASS_NONE;
 
-        if (letter) {
+        if (kind != CLASS_NONE && kind == run) {
             if (at + 1 < sizeof word)
-                word[at++] = (char)tolower((unsigned char)c);
+                word[at++] = (char)tolower(c);
             continue;
         }
 
@@ -136,11 +145,18 @@ static int tokenize(const char *text, unsigned short *out, int max)
                 out[count++] = (unsigned short)word_id(word);
             at = 0;
         }
+        run = CLASS_NONE;
+
+        if (kind != CLASS_NONE) {
+            word[at++] = (char)tolower(c);
+            run = kind;
+            continue;
+        }
 
         if (c == '\0')
             break;
-        if ((c == '.' || c == ',' || c == '!' || c == '?') && count < max) {
-            char punctuation[2] = { c, '\0' };
+        if (strchr(".,!?;:", (char)c) != NULL && count < max) {
+            char punctuation[2] = { (char)c, '\0' };
             out[count++] = (unsigned short)word_id(punctuation);
         }
     }
@@ -302,7 +318,12 @@ static void answer(char *out, size_t outsz)
         snprintf(out, outsz, "%.*s", (int)outsz - 1, best);
 }
 
-/* Normalise a line the way codegen.c expects: lower case, single spaces. */
+/*
+ * Normalise a line the way codegen.c expects: lower case, single spaces.
+ * '-' is kept rather than treated as a separator, so a hyphenated word like
+ * "hello-world" survives as one token and can match a snippet key that lists
+ * it literally -- codegen.c's keyword lists rely on this.
+ */
 static void flatten(const char *in, char *out, size_t outsz)
 {
     size_t j = 0;
@@ -310,11 +331,11 @@ static void flatten(const char *in, char *out, size_t outsz)
 
     for (size_t i = 0; in[i] && j + 1 < outsz; i++) {
         unsigned char c = (unsigned char)in[i];
-        if (isalnum(c)) {
+        if (isalnum(c) || c == '-') {
             if (space && j > 0 && j + 1 < outsz)
                 out[j++] = ' ';
             space = 0;
-            out[j++] = (char)tolower(c);
+            out[j++] = (c == '-') ? '-' : (char)tolower(c);
         } else {
             space = (j > 0);
         }

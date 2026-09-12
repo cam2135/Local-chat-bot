@@ -318,6 +318,7 @@ class Engine:
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            cwd=ROOT,
         )
         # It says nothing until it is asked, so there is nothing to read here.
 
@@ -983,7 +984,9 @@ class Session:
 
         self.note(f"training for {minutes:g} minutes -- Ctrl-C stops early "
                   f"and keeps what it learned")
-        train(minutes, self.compiler)
+        if not train(minutes, self.compiler):
+            self.note("training didn't produce a model -- see the output above")
+            return
         self.replay()          # pick the new weights up straight away
         self.note("back with the newly trained model")
         self.cmd_model()
@@ -1026,7 +1029,11 @@ class Session:
     def cmd_export(self, arg: str) -> None:
         default = (f"{self.chat.name}.txt" if self.chat.name
                    else f"chat-{time.strftime('%Y%m%d-%H%M%S')}.txt")
-        target = ROOT / (arg or default)
+        # .name keeps only the final path segment, so neither an absolute
+        # path nor a "../" can point this outside ROOT -- /export always
+        # writes into the repo, never over an arbitrary file.
+        name = Path(arg).name if arg else default
+        target = ROOT / (name or default)
         try:
             target.write_text(self.chat.as_text(), encoding="utf-8")
         except OSError as err:

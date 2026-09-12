@@ -129,6 +129,11 @@ int main(int argc, char **argv)
             lr = (float)atof(argv[++i]);
     }
 
+    if (!(minutes > 0.0)) {
+        fprintf(stderr, "--minutes must be greater than 0 (got %g)\n", minutes);
+        return 1;
+    }
+
     signal(SIGINT, on_interrupt);
     signal(SIGTERM, on_interrupt);
 
