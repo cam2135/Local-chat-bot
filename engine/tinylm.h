@@ -85,6 +85,9 @@ float lm_forward(LM *lm, const unsigned short *inputs,
 /* One AdamW update from whatever is in lm->grads, then zero the grads. */
 void lm_step(LM *lm, float learning_rate, float weight_decay, float clip);
 
+/* Read out the logits lm_forward computed for one (batch, position) pair. */
+void lm_read_logits(LM *lm, int batch_index, int position, float *out);
+
 int lm_save(const LM *lm, const char *path);
 int lm_load(LM *lm, const char *path, int batch);
 
@@ -100,5 +103,42 @@ int lm_generate(LM *lm, const unsigned short *prompt, int prompt_len,
                 float temperature, int top_k, float repeat_penalty,
                 const unsigned short *stops, int stop_count,
                 unsigned *seed, float *out_logprob);
+
+/*
+ * A key/value cache for one sequence, so generating token N+1 does not mean
+ * recomputing every layer's attention over tokens 0..N from scratch again --
+ * only the one new token's own values need computing; everything before it
+ * was already worked out on a previous call and is just reused. This is the
+ * standard trick every LLM inference server relies on; without it, decoding
+ * a run of N tokens costs O(N^2) instead of O(N).
+ *
+ * Positions are relative to the cache, not the whole conversation: once it
+ * fills up (length == config.context), the oldest entry is dropped to make
+ * room, the same sliding window lm_generate has always used.
+ */
+typedef struct {
+    float *k, *v;    /* layers x context x dim */
+    float *scratch;  /* internal use */
+    int length;      /* positions currently held, 0..config.context */
+} LMCache;
+
+int lm_cache_init(LMCache *cache, const LMConfig *config);
+void lm_cache_free(LMCache *cache);
+
+/*
+ * Process `count` tokens (<= config.context) into an empty cache. Writes the
+ * logits for the last of them (what should come after the prompt) into
+ * `logits_out`, sized config.vocab.
+ */
+void lm_prefill(LM *lm, const unsigned short *tokens, int count,
+                LMCache *cache, float *logits_out);
+
+/*
+ * Extend the cache by exactly one more token and write the logits for what
+ * should come after *it* into `logits_out`. This is the cheap, O(1)-amortised
+ * step lm_generate calls in a loop once the prompt has been prefilled.
+ */
+void lm_decode_step(LM *lm, unsigned short token, LMCache *cache,
+                    float *logits_out);
 
 #endif /* TINYLM_H */

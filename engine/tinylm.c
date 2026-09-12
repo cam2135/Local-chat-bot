@@ -517,6 +517,22 @@ void lm_free(LM *lm)
     memset(lm, 0, sizeof *lm);
 }
 
+/*
+ * The logits row for one (batch, position) pair from whatever lm_forward
+ * last computed. Exists so the shape of Acts stays private to this file
+ * even for callers -- like the cache correctness check -- that only want to
+ * read out one already-computed result, not touch the internals directly.
+ */
+void lm_read_logits(LM *lm, int batch_index, int position, float *out)
+{
+    Acts a;
+    point_acts(&a, lm->acts, &lm->config, lm->batch);
+    memcpy(out,
+           a.logits + ((size_t)batch_index * lm->config.context + position)
+                      * (size_t)lm->config.vocab,
+           sizeof(float) * (size_t)lm->config.vocab);
+}
+
 float lm_forward(LM *lm, const unsigned short *inputs,
                  const unsigned short *targets, int do_backward)
 {
@@ -808,6 +824,247 @@ int lm_load(LM *lm, const char *path, int batch)
     return 0;
 }
 
+/* ------------------------------------------------------------ the cache */
+
+/*
+ * Everything one token needs as it passes through one layer, sized D or F
+ * (4*D), carved out of one flat allocation the same way params/acts are.
+ * Reused for every layer in turn, since a decode step handles one token at a
+ * time, one layer at a time -- there is never more than one layer's worth of
+ * this live at once.
+ */
+typedef struct {
+    float *x, *ln1, *q, *k, *v, *attn_out, *proj, *res1;
+    float *ln2, *fc1_raw, *fc1, *fc2, *res2, *lnf;
+    float *scores;   /* softmax buffer, one per cached position */
+    float stat[6];   /* the six mean/rstd scalars layernorm_forward wants */
+} DecodeScratch;
+
+static size_t decode_scratch_floats(const LMConfig *c)
+{
+    int D = c->dim, F = 4 * D;
+    /* x, ln1, q, k, v, attn_out, proj, res1, ln2, fc2, res2, lnf: 12 of them */
+    return (size_t)12 * D + (size_t)2 * F + (size_t)c->context;
+}
+
+static void point_decode_scratch(DecodeScratch *s, float *flat, const LMConfig *c)
+{
+    int D = c->dim, F = 4 * D;
+    float *at = flat;
+
+    s->x        = at; at += D;
+    s->ln1      = at; at += D;
+    s->q        = at; at += D;
+    s->k        = at; at += D;
+    s->v        = at; at += D;
+    s->attn_out = at; at += D;
+    s->proj     = at; at += D;
+    s->res1     = at; at += D;
+    s->ln2      = at; at += D;
+    s->fc1_raw  = at; at += F;
+    s->fc1      = at; at += F;
+    s->fc2      = at; at += D;
+    s->res2     = at; at += D;
+    s->lnf      = at; at += D;
+    s->scores   = at; at += c->context;
+}
+
+int lm_cache_init(LMCache *cache, const LMConfig *config)
+{
+    size_t kv = (size_t)config->layers * config->context * config->dim;
+
+    memset(cache, 0, sizeof *cache);
+    cache->k = (float *)calloc(kv, sizeof(float));
+    cache->v = (float *)calloc(kv, sizeof(float));
+    cache->scratch = (float *)calloc(decode_scratch_floats(config), sizeof(float));
+    if (cache->k == NULL || cache->v == NULL || cache->scratch == NULL) {
+        lm_cache_free(cache);
+        return -1;
+    }
+    cache->length = 0;
+    return 0;
+}
+
+void lm_cache_free(LMCache *cache)
+{
+    free(cache->k);
+    free(cache->v);
+    free(cache->scratch);
+    memset(cache, 0, sizeof *cache);
+}
+
+/*
+ * One token's query attending over every cached key/value up to and
+ * including its own (just-appended) one. Same maths as attention_forward's
+ * inner loop, specialised to a single query instead of a whole batch.
+ */
+static void attention_decode_step(float *out, float *scores,
+                                  const float *cache_k, const float *cache_v,
+                                  const float *q, int length, int D, int H)
+{
+    int hd = D / H;
+    float scale = 1.0f / sqrtf((float)hd);
+
+    for (int h = 0; h < H; h++) {
+        const float *qq = q + h * hd;
+        float max = -1e30f, sum = 0.0f;
+
+        for (int s = 0; s < length; s++) {
+            const float *kk = cache_k + (size_t)s * D + h * hd;
+            float dot = 0.0f;
+            for (int c = 0; c < hd; c++)
+                dot += qq[c] * kk[c];
+            dot *= scale;
+            scores[s] = dot;
+            if (dot > max)
+                max = dot;
+        }
+        for (int s = 0; s < length; s++) {
+            scores[s] = expf(scores[s] - max);
+            sum += scores[s];
+        }
+
+        float *dest = out + h * hd;
+        for (int c = 0; c < hd; c++)
+            dest[c] = 0.0f;
+        for (int s = 0; s < length; s++) {
+            const float *vv = cache_v + (size_t)s * D + h * hd;
+            float weight = scores[s] / sum;
+            for (int c = 0; c < hd; c++)
+                dest[c] += weight * vv[c];
+        }
+    }
+}
+
+/* Slide a layer's cached K/V left by one position, dropping the oldest. */
+static void evict_oldest(float *cache_kv, int layers, int context, int dim)
+{
+    for (int l = 0; l < layers; l++) {
+        float *base = cache_kv + (size_t)l * context * dim;
+        memmove(base, base + dim, sizeof(float) * (size_t)(context - 1) * dim);
+    }
+}
+
+/* One token through one layer, using and extending that layer's cache. */
+static void decode_layer(LM *lm, int layer, DecodeScratch *s,
+                         float *cache_k, float *cache_v, int length)
+{
+    LMConfig *c = &lm->config;
+    LMParams *p = &lm->params;
+    int D = c->dim, H = c->heads, F = 4 * D;
+    float *mean = &s->stat[0], *rstd = &s->stat[1];
+    float *k_slot = cache_k + (size_t)length * D;
+    float *v_slot = cache_v + (size_t)length * D;
+
+    layernorm_forward(s->ln1, mean, rstd, s->x,
+                      p->ln1_scale + (size_t)layer * D,
+                      p->ln1_bias + (size_t)layer * D, 1, D);
+
+    matmul_forward(s->q, s->ln1, p->wq + (size_t)layer * D * D, NULL, 1, D, D);
+    matmul_forward(k_slot, s->ln1, p->wk + (size_t)layer * D * D, NULL, 1, D, D);
+    matmul_forward(v_slot, s->ln1, p->wv + (size_t)layer * D * D, NULL, 1, D, D);
+
+    attention_decode_step(s->attn_out, s->scores, cache_k, cache_v, s->q,
+                          length + 1, D, H);
+    matmul_forward(s->proj, s->attn_out, p->wo + (size_t)layer * D * D,
+                  NULL, 1, D, D);
+
+    for (int i = 0; i < D; i++)
+        s->res1[i] = s->x[i] + s->proj[i];
+
+    layernorm_forward(s->ln2, mean + 2, rstd + 2, s->res1,
+                      p->ln2_scale + (size_t)layer * D,
+                      p->ln2_bias + (size_t)layer * D, 1, D);
+
+    matmul_forward(s->fc1_raw, s->ln2, p->w1 + (size_t)layer * F * D,
+                  p->b1 + (size_t)layer * F, 1, D, F);
+    gelu_forward(s->fc1, s->fc1_raw, (size_t)F);
+    matmul_forward(s->fc2, s->fc1, p->w2 + (size_t)layer * D * F,
+                  p->b2 + (size_t)layer * D, 1, F, D);
+
+    for (int i = 0; i < D; i++)
+        s->res2[i] = s->res1[i] + s->fc2[i];
+}
+
+/* Shared tail end of prefill and decode: one token's final residual stream
+ * value in, its logits out. */
+static void decode_finish(LM *lm, DecodeScratch *s, const float *residual,
+                          float *logits_out)
+{
+    LMConfig *c = &lm->config;
+    LMParams *p = &lm->params;
+    float *mean = &s->stat[4], *rstd = &s->stat[5];
+
+    layernorm_forward(s->lnf, mean, rstd, residual,
+                      p->lnf_scale, p->lnf_bias, 1, c->dim);
+    matmul_forward(logits_out, s->lnf, p->tok_emb, NULL, 1, c->dim, c->vocab);
+}
+
+void lm_prefill(LM *lm, const unsigned short *tokens, int count,
+               LMCache *cache, float *logits_out)
+{
+    LMConfig *c = &lm->config;
+    DecodeScratch s;
+
+    point_decode_scratch(&s, cache->scratch, c);
+    cache->length = 0;
+
+    for (int t = 0; t < count; t++) {
+        const float *tok = lm->params.tok_emb + (size_t)tokens[t] * c->dim;
+        const float *pos = lm->params.pos_emb + (size_t)t * c->dim;
+
+        for (int i = 0; i < c->dim; i++)
+            s.x[i] = tok[i] + pos[i];
+
+        for (int l = 0; l < c->layers; l++) {
+            decode_layer(lm, l, &s,
+                        cache->k + (size_t)l * c->context * c->dim,
+                        cache->v + (size_t)l * c->context * c->dim,
+                        cache->length);
+            memcpy(s.x, s.res2, sizeof(float) * (size_t)c->dim);
+        }
+        cache->length++;
+
+        if (t == count - 1)
+            decode_finish(lm, &s, s.x, logits_out);
+    }
+}
+
+void lm_decode_step(LM *lm, unsigned short token, LMCache *cache,
+                    float *logits_out)
+{
+    LMConfig *c = &lm->config;
+    DecodeScratch s;
+    int position;
+
+    point_decode_scratch(&s, cache->scratch, c);
+
+    if (cache->length >= c->context) {
+        evict_oldest(cache->k, c->layers, c->context, c->dim);
+        evict_oldest(cache->v, c->layers, c->context, c->dim);
+        cache->length = c->context - 1;
+    }
+    position = cache->length;
+
+    {
+        const float *tok = lm->params.tok_emb + (size_t)token * c->dim;
+        const float *pos = lm->params.pos_emb + (size_t)position * c->dim;
+        for (int i = 0; i < c->dim; i++)
+            s.x[i] = tok[i] + pos[i];
+    }
+
+    for (int l = 0; l < c->layers; l++) {
+        decode_layer(lm, l, &s,
+                    cache->k + (size_t)l * c->context * c->dim,
+                    cache->v + (size_t)l * c->context * c->dim,
+                    position);
+        memcpy(s.x, s.res2, sizeof(float) * (size_t)c->dim);
+    }
+    cache->length = position + 1;
+
+    decode_finish(lm, &s, s.x, logits_out);
+}
+
 /* --------------------------------------------------------- generating */
 
 int lm_generate(LM *lm, const unsigned short *prompt, int prompt_len,
@@ -820,32 +1077,31 @@ int lm_generate(LM *lm, const unsigned short *prompt, int prompt_len,
     int T = c->context, V = c->vocab;
     unsigned short *window = (unsigned short *)calloc((size_t)T, sizeof(unsigned short));
     float *scratch = (float *)malloc(sizeof(float) * (size_t)V);
+    LMCache cache;
     int produced = 0;
     float logprob_total = 0.0f;
-    Acts a;
 
-    if (window == NULL || scratch == NULL || lm->batch != 1) {
+    if (window == NULL || scratch == NULL || lm->batch != 1 ||
+        lm_cache_init(&cache, c) != 0) {
         free(window);      /* generation runs one sequence at a time */
         free(scratch);
         return 0;
     }
-    point_acts(&a, lm->acts, c, lm->batch);
 
-    /* the model can only see the last T tokens; keep the most recent ones */
+    /* the model can only see the last T tokens; keep the most recent ones.
+     * `window` is now bookkeeping only (for the repeat penalty and the
+     * eviction-timing check below) -- the actual computation lives in the
+     * cache, built once by lm_prefill and then extended one token at a time
+     * by lm_decode_step, instead of recomputing the whole window from
+     * scratch on every single generated token. */
     int start = prompt_len > T ? prompt_len - T : 0;
     int len = prompt_len - start;
     for (int i = 0; i < len; i++)
         window[i] = prompt[start + i];
 
+    lm_prefill(lm, window, len, &cache, scratch);
+
     for (int step = 0; step < max_new; step++) {
-        int at = len - 1;
-
-        lm_forward(lm, window, NULL, 0);
-
-        const float *logits = a.logits + (size_t)at * V;
-        for (int j = 0; j < V; j++)
-            scratch[j] = logits[j];
-
         /* never invent the unknown-word token */
         scratch[TOK_UNK] = -1e30f;
 
@@ -922,6 +1178,7 @@ int lm_generate(LM *lm, const unsigned short *prompt, int prompt_len,
 
         for (int s = 0; s < stop_count; s++)
             if (choice == stops[s]) {
+                lm_cache_free(&cache);
                 free(window);
                 free(scratch);
                 if (out_logprob)
@@ -937,8 +1194,13 @@ int lm_generate(LM *lm, const unsigned short *prompt, int prompt_len,
                     sizeof(unsigned short) * (size_t)(T - 1));
             window[T - 1] = (unsigned short)choice;
         }
+
+        /* logits for the *next* step, extending the cache by this one token
+         * instead of recomputing the whole window over again */
+        lm_decode_step(lm, (unsigned short)choice, &cache, scratch);
     }
 
+    lm_cache_free(&cache);
     free(window);
     free(scratch);
     if (out_logprob)

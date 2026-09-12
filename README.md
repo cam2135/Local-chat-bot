@@ -76,16 +76,36 @@ or from inside the chat:
 you> /train 30
 ```
 
-The first time you train, it also fetches the training text — the [Stanford
-Alpaca dataset](https://github.com/tatsu-lab/stanford_alpaca), 52,000
-instruction/response pairs (about 22MB, downloaded once and cached in `data/`,
-then filtered down to the ~37k that are clean prose a word-level model can
-learn from — see `train/prepare.py` for exactly what gets dropped and why).
-That's the only thing that gets downloaded; the model itself is never replaced
-with someone else's weights, only further trained on top of what already
-shipped. `/train` picks up from wherever the model currently is — your own
-training time is never wasted, and neither is the time that already went into
-the base model.
+The first time you train, it also fetches the training text — two sources,
+both turned into the same tagged-turn format:
+
+- the [Stanford Alpaca dataset](https://github.com/tatsu-lab/stanford_alpaca),
+  52,000 instruction/response pairs (about 22MB), filtered down to the ~37k
+  that are clean prose a word-level model can learn from
+- [WikiText-2](https://github.com/pytorch/examples/tree/main/word_language_model),
+  real Wikipedia article text, turned into "tell me about *X*" -> the
+  article's own opening summary
+
+Reddit was asked for too, at one point. It isn't in here: the Reddit API,
+Pushshift, and Wikipedia's own API/dumps servers are all unreachable from
+where this trains, so rather than fake it with something that isn't really
+Reddit, it's just not included. `train/prepare.py`'s docstring says exactly
+this, and exactly what gets dropped from each real source and why.
+
+Both are downloaded once and cached in `data/`. That's the only thing that
+gets fetched; the model itself is never replaced with someone else's weights,
+only further trained on top of what already shipped. `/train` picks up from
+wherever the model currently is — your own training time is never wasted, and
+neither is the time that already went into the base model.
+
+The vocabulary is frozen the first time it's built and never rebuilt after —
+adding a new data source, like WikiText-2 was added here, teaches the model
+new *things to say* without renumbering the words it already knows, which
+would otherwise scramble every embedding an existing checkpoint had learned.
+Words a new source brings that aren't already known just read as `<unk>`,
+same as any unfamiliar word. Delete `data/vocab.txt` to force a fresh one
+built from whatever sources are configured at the time — only do this
+alongside starting training over from random weights, never with `--resume`.
 
 Training prints its progress:
 
@@ -168,7 +188,13 @@ Options: `python3 run.py --train 30`, `--open work`, `--mode pro`, `--prepare`,
 ## Modes
 
 The model is the same in all three. What changes is how many answers it samples
-before choosing one, so the wait is real work rather than a pause:
+before choosing one, so the wait is real work rather than a pause. Generation
+uses a key/value cache -- each new word reuses everything already computed for
+the words before it, instead of recomputing the whole reply from scratch every
+time, which is what made `pro` mode painfully slow before this was added
+(roughly a 9x speedup, measured on this box: 5.3s down to 0.6s for one `pro`
+reply). This is the same trick every real LLM inference server relies on, not
+a shortcut specific to this project.
 
 | Mode | What it does |
 | --- | --- |
@@ -242,11 +268,15 @@ Every turn:
 1. your line is split into words the same way the training data was, and turned
    into token numbers;
 2. it is appended to the conversation history, tagged `<user>`;
-3. a `<bot>` marker is added, and the model is asked what comes next;
+3. a `<bot>` marker is added, and the whole history so far is run through the
+   network once (the "prefill"), filling a key/value cache -- everything the
+   attention step will ever need to look back on, computed exactly once;
 4. words are sampled one at a time — temperature, top-k, and a repetition
-   penalty — until it produces a `<user>` or `<end>` marker, or hits the length
-   limit;
-5. in smart and pro mode several answers are drawn and the most confident kept;
+   penalty — each new word extending that same cache by one entry rather than
+   recomputing everything before it, until the model produces a `<user>` or
+   `<end>` marker, or the reply hits its length limit;
+5. in smart and pro mode this whole process runs several times and the most
+   confident answer is kept;
 6. the answer is turned back into text and added to the history.
 
 The model sees the last 96 tokens, so it reads your whole message and the few

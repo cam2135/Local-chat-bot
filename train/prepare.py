@@ -2,16 +2,25 @@
 """
 prepare.py -- turn instruction data into something the model can learn from.
 
-It takes the Stanford Alpaca dataset (52,000 instruction -> response pairs,
-written to train a helpful assistant rather than transcribed from film scripts),
-cleans it up, builds a vocabulary, and writes the whole thing out as a stream of
-token numbers for engine/train_lm.c to train on.
+Two sources, both turned into the same <user>/<bot> turn format:
 
-    python3 train/prepare.py            # downloads the dataset if it is missing
+  - the Stanford Alpaca dataset (52,000 instruction -> response pairs, written
+    to train a helpful assistant rather than transcribed from film scripts)
+  - WikiText-2 (real Wikipedia article text, used as-is by NLP researchers),
+    turned into "tell me about <title>" -> <opening paragraph> pairs
+
+Reddit was asked for too, but nothing usable is reachable from here: the
+Reddit API, Pushshift, and Wikipedia's own API/dumps servers are all
+unreachable from this sandbox (only plain files on GitHub are); rather than
+fake it, this only uses what is genuinely available. See the note in
+load_wiki() if you want to point it at something else.
+
+    python3 train/prepare.py            # downloads both sources if missing
 
 Everything lands in data/:
 
-    alpaca_data.json   raw dataset (downloaded once)
+    alpaca_data.json   raw Alpaca dataset (downloaded once)
+    wikitext2.txt      raw WikiText-2 dataset (downloaded once)
     vocab.txt           one word per line, most common first
     corpus.bin           the training data: little endian uint16 token ids
     corpus.txt           the same thing readable, for when you are curious
@@ -30,9 +39,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 
-SOURCE_URL = ("https://raw.githubusercontent.com/tatsu-lab/"
+ALPACA_URL = ("https://raw.githubusercontent.com/tatsu-lab/"
               "stanford_alpaca/main/alpaca_data.json")
-RAW_FILE = "alpaca_data.json"
+ALPACA_FILE = "alpaca_data.json"
+
+WIKI_URL = ("https://raw.githubusercontent.com/pytorch/examples/main/"
+            "word_language_model/data/wikitext-2/train.txt")
+WIKI_FILE = "wikitext2.txt"
 
 VOCAB_SIZE = 8000          # words kept; everything else becomes <unk>
 MAX_PROMPT_WORDS = 50      # instruction (+ input), combined
@@ -70,17 +83,17 @@ SPECIALS = [UNK, USER, BOT, END]
 WORD = re.compile(r"[a-z']+|[0-9]+|[.,!?;:]")
 
 
-def download() -> None:
+def download(url: str, name: str, min_size: int) -> None:
     DATA.mkdir(exist_ok=True)
-    target = DATA / RAW_FILE
-    if target.exists() and target.stat().st_size > 1_000_000:
+    target = DATA / name
+    if target.exists() and target.stat().st_size > min_size:
         return
-    print(f"downloading {RAW_FILE} ...", flush=True)
+    print(f"downloading {name} ...", flush=True)
     try:
-        with urllib.request.urlopen(SOURCE_URL, timeout=300) as response:
+        with urllib.request.urlopen(url, timeout=300) as response:
             target.write_bytes(response.read())
     except Exception as err:
-        sys.exit(f"could not download {RAW_FILE}: {err}\n"
+        sys.exit(f"could not download {name}: {err}\n"
                  f"Put it in {DATA} by hand and run this again.")
     print(f"  {target.stat().st_size // 1024} KB")
 
@@ -104,9 +117,9 @@ def leaks_identity(text: str) -> bool:
     return any(phrase in lowered for phrase in IDENTITY_LEAKS)
 
 
-def load_examples() -> list[tuple[str, str]]:
+def load_alpaca() -> list[tuple[list[str], list[str]]]:
     """(prompt, output) pairs, already word-split, worth learning from."""
-    raw = json.loads((DATA / RAW_FILE).read_text(encoding="utf-8"))
+    raw = json.loads((DATA / ALPACA_FILE).read_text(encoding="utf-8"))
     kept: list[tuple[list[str], list[str]]] = []
     dropped = Counter()
 
@@ -140,26 +153,132 @@ def load_examples() -> list[tuple[str, str]]:
 
         kept.append((prompt_words, output_words))
 
-    print(f"  kept {len(kept):,} of {len(raw):,} examples")
+    print(f"  alpaca: kept {len(kept):,} of {len(raw):,} examples")
+    for reason, count in dropped.most_common():
+        print(f"    dropped {count:,} ({reason})")
+    return kept
+
+
+WIKI_TITLE = re.compile(r"^ = ([^=].*[^=]) = *$")
+
+# What to ask for a given article title. Rotates so the model does not learn
+# to always answer the exact same way.
+WIKI_PROMPTS = [
+    "tell me about {}",
+    "what is {}",
+    "what can you tell me about {}",
+    "give me some information about {}",
+    "describe {}",
+]
+
+
+def load_wiki() -> list[tuple[list[str], list[str]]]:
+    """
+    (prompt, output) pairs made from real Wikipedia article openings, framed
+    as "tell me about X" -> the article's own summary paragraph.
+
+    To point this at something else instead -- your own notes, a book, a
+    different topic dump -- replace WIKI_URL above (or write your own loader
+    with this same shape) and keep this function's return type: a list of
+    (prompt_words, output_words) tuples, same as load_alpaca().
+    """
+    raw = (DATA / WIKI_FILE).read_text(encoding="utf-8", errors="replace")
+    lines = raw.split("\n")
+    kept: list[tuple[list[str], list[str]]] = []
+    dropped = Counter()
+    seen_titles = 0
+
+    i = 0
+    while i < len(lines):
+        match = WIKI_TITLE.match(lines[i])
+        if match is None:
+            i += 1
+            continue
+        title = match.group(1).strip()
+        seen_titles += 1
+
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        paragraph = lines[j].strip() if j < len(lines) else ""
+        i = j + 1
+
+        if "<unk>" in title or ";" in title or len(title.split()) > 12:
+            dropped["bad_title"] += 1
+            continue
+        if not paragraph:
+            dropped["bad_paragraph"] += 1
+            continue
+
+        # WikiText masks rare words as <unk> -- usually just a handful in an
+        # otherwise fine paragraph. A few missing words barely matter to a
+        # model this size, so drop the marker rather than the whole thing;
+        # only give up on paragraphs where it is too dense to make sense of.
+        words = paragraph.split()
+        unk_rate = sum(1 for w in words if "<unk>" in w) / len(words)
+        if unk_rate > 0.15:
+            dropped["too_many_unknown_words"] += 1
+            continue
+        paragraph = re.sub(r"\s*<unk>\s*", " ", paragraph).strip()
+
+        if not paragraph or is_messy(paragraph):
+            dropped["bad_paragraph"] += 1
+            continue
+
+        # WikiText's own escaping for punctuation stuck inside a word/number.
+        paragraph = (paragraph.replace("@-@", "-").replace("@,@", ",")
+                    .replace("@.@", "."))
+        title_clean = title.replace("@-@", "-")
+
+        prompt_words = tokenize(WIKI_PROMPTS[seen_titles % len(WIKI_PROMPTS)]
+                                .format(title_clean))
+        output_words = tokenize(paragraph)
+
+        if len(output_words) < MIN_OUTPUT_WORDS:
+            dropped["too_short"] += 1
+            continue
+        # Encyclopedia leads run long; truncating the summary is fine here --
+        # unlike a dialogue turn, there is no earlier context being cut off,
+        # so "the answer can stop here" is simply true of a shorter summary.
+        output_words = output_words[:MAX_OUTPUT_WORDS]
+
+        kept.append((prompt_words, output_words))
+
+    print(f"  wikitext: kept {len(kept):,} of {seen_titles:,} articles")
     for reason, count in dropped.most_common():
         print(f"    dropped {count:,} ({reason})")
     return kept
 
 
 def main() -> int:
-    download()
+    download(ALPACA_URL, ALPACA_FILE, min_size=1_000_000)
+    download(WIKI_URL, WIKI_FILE, min_size=1_000_000)
 
-    print("reading the dataset ...", flush=True)
-    examples = load_examples()
+    print("reading the datasets ...", flush=True)
+    examples = load_alpaca() + load_wiki()
+    print(f"  {len(examples):,} examples total")
 
-    print("building the vocabulary ...", flush=True)
+    vocab_path = DATA / "vocab.txt"
     counts = Counter(word for prompt, output in examples
                      for word in prompt + output)
-    common = [word for word, _ in counts.most_common(VOCAB_SIZE - len(SPECIALS))]
-    vocab = SPECIALS + common
+
+    if vocab_path.exists():
+        # A trained model's token embeddings are tied to word -> id, so once
+        # a vocabulary has been used for real training it stays fixed: adding
+        # a new data source must never renumber it out from under an existing
+        # checkpoint. New words this source brings just fall back to <unk>,
+        # the same as any other word the model has not seen before.
+        vocab = vocab_path.read_text(encoding="utf-8").splitlines()
+        print(f"  reusing the existing {len(vocab):,}-word vocabulary "
+              f"(delete data/vocab.txt to rebuild it from scratch)")
+    else:
+        common = [w for w, _ in counts.most_common(VOCAB_SIZE - len(SPECIALS))]
+        vocab = SPECIALS + common
+        print(f"  building a new {len(vocab):,}-word vocabulary")
+
     index = {word: number for number, word in enumerate(vocab)}
-    covered = sum(counts[w] for w in common) / max(1, sum(counts.values()))
-    print(f"  {len(vocab):,} words, covering {covered:.1%} of the text")
+    covered = sum(counts.get(w, 0) for w in vocab) / max(1, sum(counts.values()))
+    print(f"  covers {covered:.1%} of this text")
 
     print("writing the training stream ...", flush=True)
     stream: list[int] = []
