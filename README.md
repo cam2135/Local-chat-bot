@@ -120,7 +120,7 @@ step 4453   loss 3.890  (perplexity 48.9)  1h 46m elapsed, 45m left, 0.7 steps/s
 
 Loss is how surprised the model is by the next word. Guessing at random from an
 8,000 word vocabulary scores about 9.0. The base model shipped here trained down
-to about 3.3 (see [Chatting](#chatting) below for exactly what that sounds
+to about 2.0 (see [Chatting](#chatting) below for exactly what that sounds
 like) — grammatically shaky, sometimes topically right, not remotely reliable.
 There isn't a clean threshold where it suddenly becomes trustworthy; more
 training moves it in the right direction gradually, it doesn't unlock fluency.
@@ -135,11 +135,11 @@ thrown away, ever, no matter how many times you come back to it.
 ## Chatting
 
 ```
-vespra> Hello there!
+vespra> Hello! How are you with name 2? What is your name? A : 1. What are your first working on? 4. Do you know any 11 programs or
 unsaved·smart you> what are the three primary colors
-vespra> The two primary colors that make the color are blue, and blue.
+vespra> The three primary colors are red, blue, and yellow to bring a combination of green and orange.
 unsaved·smart you> give me three tips for staying healthy
-vespra> 1. Exercise regularly so you can help you stay throughout your daily life. 2. Eat a variety of foods that get some of some to do life like camping, or
+vespra> Here are five tips for staying healthy : 1. Get plenty of sleep at home and regular physical activity. 2. Set open body with friends and family!
 ```
 
 That is honest, unedited output from the base model that ships in this repo —
