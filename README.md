@@ -194,7 +194,15 @@ the words before it, instead of recomputing the whole reply from scratch every
 time, which is what made `pro` mode painfully slow before this was added
 (roughly a 9x speedup, measured on this box: 5.3s down to 0.6s for one `pro`
 reply). This is the same trick every real LLM inference server relies on, not
-a shortcut specific to this project.
+a shortcut specific to this project. It only pays off while the conversation
+still fits in the model's 96 token memory (see `/model`) -- this model's
+positions are learned per absolute slot rather than relative to the current
+word, so once the conversation runs past that limit, every new word has to
+push the oldest one out and the cache has to be rebuilt to keep every
+position correct, which costs the same as the old no-cache path. Short
+exchanges get the full speedup; long-running conversations gradually settle
+back to the old speed rather than answering with stale, wrongly-positioned
+context.
 
 | Mode | What it does |
 | --- | --- |

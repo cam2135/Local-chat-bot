@@ -484,7 +484,7 @@ class Chat:
         chat = cls()
         chat.name = data.get("name", name)
         chat.user = data.get("user", "")
-        chat.mode = data.get("mode", "smart")
+        chat.mode = data.get("mode") if data.get("mode") in MODES else "smart"
         chat.swearing = data.get("swearing", True)
         chat.created = data.get("created", "")
         chat.turns = data.get("turns", [])
@@ -744,6 +744,9 @@ class Session:
         if not arg:
             self.note("open which one? /list shows them")
             return
+        if not SAFE_NAME.match(arg):
+            self.note(f"no chat called {arg}. /list shows what there is")
+            return
         if not Chat.path_for(arg).exists():
             self.note(f"no chat called {arg}. /list shows what there is")
             return
@@ -810,7 +813,7 @@ class Session:
             self.note(f"removed {len(names)} chat(s)")
             return
 
-        if not Chat.path_for(arg).exists():
+        if not SAFE_NAME.match(arg) or not Chat.path_for(arg).exists():
             self.note(f"no chat called {arg}")
             return
         if not self.ask_yes_no(f"remove chat {arg}?"):

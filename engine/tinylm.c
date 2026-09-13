@@ -877,7 +877,9 @@ int lm_cache_init(LMCache *cache, const LMConfig *config)
     cache->k = (float *)calloc(kv, sizeof(float));
     cache->v = (float *)calloc(kv, sizeof(float));
     cache->scratch = (float *)calloc(decode_scratch_floats(config), sizeof(float));
-    if (cache->k == NULL || cache->v == NULL || cache->scratch == NULL) {
+    cache->tokens = (unsigned short *)calloc((size_t)config->context, sizeof(unsigned short));
+    if (cache->k == NULL || cache->v == NULL || cache->scratch == NULL ||
+        cache->tokens == NULL) {
         lm_cache_free(cache);
         return -1;
     }
@@ -890,6 +892,7 @@ void lm_cache_free(LMCache *cache)
     free(cache->k);
     free(cache->v);
     free(cache->scratch);
+    free(cache->tokens);
     memset(cache, 0, sizeof *cache);
 }
 
@@ -933,15 +936,6 @@ static void attention_decode_step(float *out, float *scores,
             for (int c = 0; c < hd; c++)
                 dest[c] += weight * vv[c];
         }
-    }
-}
-
-/* Slide a layer's cached K/V left by one position, dropping the oldest. */
-static void evict_oldest(float *cache_kv, int layers, int context, int dim)
-{
-    for (int l = 0; l < layers; l++) {
-        float *base = cache_kv + (size_t)l * context * dim;
-        memmove(base, base + dim, sizeof(float) * (size_t)(context - 1) * dim);
     }
 }
 
@@ -1013,6 +1007,7 @@ void lm_prefill(LM *lm, const unsigned short *tokens, int count,
         const float *tok = lm->params.tok_emb + (size_t)tokens[t] * c->dim;
         const float *pos = lm->params.pos_emb + (size_t)t * c->dim;
 
+        cache->tokens[t] = tokens[t];
         for (int i = 0; i < c->dim; i++)
             s.x[i] = tok[i] + pos[i];
 
@@ -1037,14 +1032,27 @@ void lm_decode_step(LM *lm, unsigned short token, LMCache *cache,
     DecodeScratch s;
     int position;
 
-    point_decode_scratch(&s, cache->scratch, c);
-
     if (cache->length >= c->context) {
-        evict_oldest(cache->k, c->layers, c->context, c->dim);
-        evict_oldest(cache->v, c->layers, c->context, c->dim);
-        cache->length = c->context - 1;
+        /* The window is full: an absolute position baked into a cached
+         * key/value can't just slide down with a memmove and stay correct,
+         * so rebuild the whole cache in one pass instead, using exactly the
+         * same last-context-tokens window lm_generate always used before
+         * caching existed. Once a conversation is longer than the context
+         * window this branch is taken on every step (there is no room left
+         * to grow into, so each new token evicts one), which is the honest
+         * O(context)-per-token cost the old method always paid; the cache
+         * only saves work while the conversation still fits inside the
+         * context window without evicting. */
+        memmove(cache->tokens, cache->tokens + 1,
+                sizeof(unsigned short) * (size_t)(c->context - 1));
+        cache->tokens[c->context - 1] = token;
+        lm_prefill(lm, cache->tokens, c->context, cache, logits_out);
+        return;
     }
+
+    point_decode_scratch(&s, cache->scratch, c);
     position = cache->length;
+    cache->tokens[position] = token;
 
     {
         const float *tok = lm->params.tok_emb + (size_t)token * c->dim;

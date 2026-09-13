@@ -112,13 +112,22 @@ int lm_generate(LM *lm, const unsigned short *prompt, int prompt_len,
  * standard trick every LLM inference server relies on; without it, decoding
  * a run of N tokens costs O(N^2) instead of O(N).
  *
- * Positions are relative to the cache, not the whole conversation: once it
- * fills up (length == config.context), the oldest entry is dropped to make
- * room, the same sliding window lm_generate has always used.
+ * This model's position embeddings are absolute and learned (position 0 is
+ * always a specific vector, not "the start of whatever window we have"), so
+ * a cached key/value bakes in the exact position it was computed at. That
+ * means the cache cannot just drop the oldest entry and slide the rest down
+ * once it fills (length == config.context): every survivor would still
+ * describe the position it used to be at, not the one it just moved into.
+ * Instead, lm_decode_step rebuilds the whole cache in one pass exactly when
+ * it fills up, using the same sliding window arithmetic lm_generate always
+ * used before caching existed -- so a full conversation longer than the
+ * context window costs an occasional O(context) rebuild rather than silently
+ * drifting from what a full recompute would have produced.
  */
 typedef struct {
     float *k, *v;    /* layers x context x dim */
     float *scratch;  /* internal use */
+    unsigned short *tokens; /* token ids currently held, 0..length-1 */
     int length;      /* positions currently held, 0..config.context */
 } LMCache;
 
